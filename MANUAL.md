@@ -1,8 +1,8 @@
 # Screen Narrator user manual
 
-Click the headphones icon in the Omarchy bar to open reading controls; right-click it to start or stop reading directly. In the popup, **▶ Start**, **❚❚ Pause** and **■ Stop** sit right under the summary. Start begins local OCR narration of the active window; Stop ends it. Pause/Resume controls playback and Read again restarts the current page. Closing the popup leaves narration running.
+Click the headphones icon in the Omarchy bar to open reading controls; right-click it to start or stop reading directly. In the popup, **▶ Start**, **❚❚ Pause** and **■ Stop** sit right under the summary. Start begins local OCR narration of the active window, which then stays the book: you can work in other windows meanwhile, even over it, and pages are still read and turned. Closing the book stops reading. Stop ends it. Pause/Resume controls playback and Read again restarts with the window that has the focus now. Closing the popup leaves narration running.
 
-Choose voice, text language (51 languages) and reading speed (60–200%). Reading controls save immediately; provider setup applies after a successful test and Use provider. Enable following window/page changes, Kindle cropping, PDF page detection, page turning and passage highlighting as needed. Select area closes the popup before region selection; Reset area clears it.
+Choose voice and text language (51 languages); set the reading speed (0.60×–2.00×) with the slider under the Start button: drag, click or scroll, or Tab to it and use ←/→; it is saved when you let go. Reading controls save immediately; provider setup applies after a successful test and Use provider. Enable following page changes, Kindle cropping, PDF page detection, page turning and passage highlighting as needed. Select area closes the popup before region selection; Reset area clears it.
 
 The integrated User Manual explains these controls in section cards. Existing reader shortcuts continue to work; this plugin does not install or replace shortcuts. The application launcher opens the bar popup. Speech engines and OCR stay in the existing local reader service.
 

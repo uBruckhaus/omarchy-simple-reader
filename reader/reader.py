@@ -203,6 +203,28 @@ def install_size(code):
     return 'about ' + str(PIPER[code][4]) + ' MB' if code in PIPER else 'download'
 
 
+# The book's window and the workspaces on screen, in one hyprctl call.
+PINNED_QUERY = ['hyprctl', '--batch', 'j/clients;j/monitors']
+
+
+def pinned_window(out, address):
+    """The book's entry from PINNED_QUERY output, plus `shown` (on a workspace that is on
+    screen, not a hidden group tab); {} once the window is closed."""
+    decoder = json.JSONDecoder()
+    clients, end = decoder.raw_decode(out.lstrip())
+    monitors, _ = decoder.raw_decode(out.lstrip()[end:].lstrip())
+    window = next((c for c in clients if c.get('address') == address), None)
+    if not window:
+        return {}
+    on_screen = set()
+    for monitor in monitors:
+        on_screen.add(monitor.get('activeWorkspace', {}).get('id'))
+        if monitor.get('specialWorkspace', {}).get('id'):
+            on_screen.add(monitor['specialWorkspace']['id'])
+    window['shown'] = window.get('workspace', {}).get('id') in on_screen and not window.get('hidden')
+    return window
+
+
 def desktop_notify(summary, body='', icon=None, timeout=None, level='info'):
     """Send every notification through one sanitized notify-send call."""
     if level in ('warning', 'error'):
@@ -507,7 +529,7 @@ class Reader(QObject):
         self.enabled = self.paused = self.scanning = False
         self.status = 'Off'
         self.target = ''
-        self.pending_window = None
+        self.target_stable = ''
         self.image_candidate = None
         self.ocr_image = None
         self.capture_stable = False
@@ -549,7 +571,7 @@ class Reader(QObject):
         self.status_action = self.menu.addAction('Status: Off')
         self.status_action.setEnabled(False)
         self.menu.addSeparator()
-        self.read_action = self.menu.addAction('Read active window again', self.read_again)
+        self.read_action = self.menu.addAction('Read active window again', lambda: self.read_again(repin=True))
         # Fixed label and always enabled: Launch & Bind binds entries by label and skips disabled ones.
         self.pause_action = self.menu.addAction('Pause / resume', self.pause)
         self.menu.addSeparator()
@@ -823,7 +845,7 @@ class Reader(QObject):
             task.cancel()
         self.scanning = False
         self.target = self.last_text = self.candidate = ''
-        self.pending_window = None
+        self.target_stable = ''
         self.image_candidate = self.ocr_image = None
         self.update('Looking for text…' if self.enabled else 'Off')
         if notify or was != self.enabled:
@@ -837,14 +859,17 @@ class Reader(QObject):
             self.kokoro_worker.close()
             self.translation_worker.close()
             self.overlay.close()
-            for name in ('window.png', 'ocr.png', 'ocr.txt', 'ocr.tsv', 'speech_0.txt', 'speech_0.wav', 'speech_1.txt', 'speech_1.wav'):
+            for name in ('window.png', 'window.ppm', 'ocr.png', 'ocr.txt', 'ocr.tsv', 'speech_0.txt', 'speech_0.wav', 'speech_1.txt', 'speech_1.wav'):
                 (RUNTIME / name).unlink(missing_ok=True)
 
-    def read_again(self):
+    def read_again(self, repin=False):
         print('Reader restart requested', file=sys.stderr, flush=True)
         if not self.enabled:
             self.set_enabled(True, notify=True)
         else:
+            if repin:
+                # Read the window that has the focus now instead of the pinned one.
+                self.target = ''
             self.image_candidate = self.ocr_image = None
             self.stop_speech()
             self.paused = False
@@ -985,12 +1010,43 @@ class Reader(QObject):
     def scan(self):
         if getattr(self, 'testing_voice', False) or not self.enabled or self.paused or self.scanning or self.menu.isVisible() or (self.dialog and self.dialog.isVisible()):
             return
-        if not self.settings['follow'] and self.last_text:
+        if not self.settings['follow'] and self.last_text and self.status != 'Waiting for the reading window':
+            if self.target:
+                # No new pages, but closing the book still ends reading.
+                self.scanning = True
+                Task(self, PINNED_QUERY, self.check_book_open, timeout=5)
             return
         # Keep checking visible text during playback: manual page turns do not
         # change the window address, but invalidate queued and generated audio.
         self.scanning = True
-        Task(self, ['hyprctl', 'activewindow', '-j'], self.got_window, timeout=5)
+        if self.target:
+            # The window reading started in stays the book, wherever the focus goes.
+            Task(self, PINNED_QUERY, self.got_pinned, timeout=5)
+        else:
+            Task(self, ['hyprctl', 'activewindow', '-j'], self.got_window, timeout=5)
+
+    def check_book_open(self, code, out, err):
+        self.scanning = False
+        try:
+            closed = not code and not pinned_window(out, self.target)
+        except (ValueError, TypeError, AttributeError):
+            closed = False
+        if closed and self.enabled:
+            self.book_closed()
+
+    def book_closed(self):
+        print(f'Reader target closed: {self.target}', file=sys.stderr, flush=True)
+        self.scanning = False
+        self.set_enabled(False)
+        desktop_notify('Screen Narrator', 'Stopped: the reading window was closed', timeout=2000)
+
+    def got_pinned(self, code, out, err):
+        if not code:
+            try:
+                out = json.dumps(pinned_window(out, self.target))
+            except (ValueError, TypeError, AttributeError) as error:
+                code, err = 1, str(error)
+        self.got_window(code, out, err)
 
     def check_window_focus(self, code, out, err):
         if code:
@@ -1018,6 +1074,10 @@ class Reader(QObject):
         try:
             window = json.loads(out)
             address = window.get('address', '')
+            if self.target and not address:
+                # The book window was closed: reading it is over.
+                self.book_closed()
+                return
             if not address or window.get('pid') == os.getpid():
                 self.scanning = False
                 return
@@ -1029,27 +1089,19 @@ class Reader(QObject):
         except (ValueError, KeyError, TypeError):
             self.scanning = False
             return
+        if window.get('shown') is False:
+            # On a workspace that is not on screen the book stops drawing: keep reading what
+            # was captured, look again when it is back.
+            self.scanning = False
+            return
 
-        if self.target and self.target != address:
-            pending = getattr(self, 'pending_window', None)
-            now = time.monotonic()
-            if not pending or pending[0] != address:
-                self.pending_window = (address, now)
-                print(f'Confirming reader focus change: {self.target} -> {address}; '
-                      f'class={window.get("class", "")}', file=sys.stderr, flush=True)
-                remaining = 350
-            else:
-                remaining = max(0, round((.35 - (now - pending[1])) * 1000))
-            if remaining:
-                # Keep queued speech through transient focus changes. Confirm a
-                # different window before cancelling the page's audio.
-                self.scanning = False
-                epoch = self.epoch
-                QTimer.singleShot(remaining, lambda: self.scan() if self.epoch == epoch else None)
-                return
-        self.pending_window = None
         self.target_title = window.get('title', '')
         self.target_class = window.get('class', '')
+        # Refreshed on every look, so a window id that shows up later is still used;
+        # a known one is kept unless the book changes.
+        stable = str(window.get('stableId') or '')
+        if stable or self.target != address:
+            self.target_stable = stable
         self.capture_window_geometry = (window['at'], window['size'])
 
         if self.target != address:
@@ -1093,17 +1145,44 @@ class Reader(QObject):
                 geom = f'{x},{y} {width}x{height}'
         self.capture_area = tuple(map(int, re.findall(r'-?\d+', geom)))
         self.scanning = True
+        stable = getattr(self, 'target_stable', '')
+        if not self.custom_area and re.fullmatch(r'[0-9a-fA-F]{1,16}', stable):
+            # The book window's own picture: other windows over it and the highlight
+            # overlay are not in it, so the highlight stays on while the page is checked.
+            self.capture_highlight = (self.epoch, self.playing_file, None)
+            self.capture_book(stable, window, self.capture_area)
+            return
         self.capture_highlight = (self.epoch, self.playing_file, self.overlay.last_payload)
         self.overlay.show([])
         epoch = self.epoch
         def capture():
             if self.epoch == epoch:
-                Task(self, ['grim', '-g', geom, RUNTIME / 'window.png'], self.captured, timeout=5)
+                # Uncompressed: ~50 ms instead of ~450 ms, the time the highlight is hidden.
+                Task(self, ['grim', '-l', '0', '-g', geom, RUNTIME / 'window.png'], self.captured, timeout=5)
         if self.capture_highlight[2] and isinstance(self.capture_highlight[2], str) and json.loads(self.capture_highlight[2]).get('rectangles'):
             # Let the compositor present the hidden overlay before fingerprinting.
             QTimer.singleShot(35, capture)
         else:
             capture()
+
+    def capture_book(self, stable, window, area):
+        """Capture `area` (screen coordinates) from the book window's own picture."""
+        epoch = self.epoch
+        (wx, wy), (ww, wh) = window['at'], window['size']
+        ax, ay, aw, ah = area
+        def crop(code, out, err):
+            if self.epoch != epoch:
+                return
+            if code:
+                self.captured(code, out, err)
+                return
+            # grim gives the window in buffer pixels: scale the area into them.
+            scale = self.image_width(RUNTIME / 'window.ppm') / max(1, ww)
+            box = (f'{max(1, round(aw * scale))}x{max(1, round(ah * scale))}'
+                   f'+{max(0, round((ax - wx) * scale))}+{max(0, round((ay - wy) * scale))}')
+            Task(self, ['magick', RUNTIME / 'window.ppm', '-crop', box, '+repage',
+                        '-define', 'png:compression-level=0', RUNTIME / 'window.png'], self.captured, timeout=5)
+        Task(self, ['grim', '-t', 'ppm', '-T', stable, RUNTIME / 'window.ppm'], crop, timeout=5)
 
     def captured(self, code, out, err):
         epoch, playing_file, payload = self.capture_highlight
@@ -1372,16 +1451,19 @@ class Reader(QObject):
 
         epoch = self.epoch
         def on_done(code, out, err):
-            self.overlay.show([])
             self.player = None
             self.playing_file = None
-            if not self.enabled or self.epoch != epoch:
+            if not self.enabled or self.epoch != epoch or code:
+                self.overlay.show([])
+                if code and self.enabled and self.epoch == epoch:
+                    self.queue.clear()
+                    self.fail('Audio playback failed: ' + err[-300:])
                 return
-            if code:
-                self.queue.clear()
-                self.fail('Audio playback failed: ' + err[-300:])
-            else:
-                self.pump_pipeline()
+            self.pump_pipeline()
+            if self.player is None:
+                # No next chunk ready: clear. A started one has already shown
+                # its passage, so the highlight moves without a blank in between.
+                self.overlay.show([])
 
         self.player = self.speech_task(args, on_done, timeout=600)
         self.overlay.show(self.audio_highlights.pop(wav_file, []) if self.settings['highlight'] else [], self.target)
@@ -1474,34 +1556,30 @@ class Reader(QObject):
             self.update('On — waiting for a new page')
 
     def do_page_turn(self):
-        if not self.enabled or self.paused:
+        if not self.enabled or self.paused or not self.target:
             return
-        # The delayed page turn must still belong to the focused Kindle window.
-        epoch = self.epoch
-        def focused(code, out, err):
-            if not self.enabled or self.paused or self.epoch != epoch:
+        # The key goes to the pinned book even when another window has the focus;
+        # Hyprland hands it over without raising or focusing the book.
+        epoch, address = self.epoch, self.target
+        def located(code, out, err):
+            if not self.enabled or self.paused or self.epoch != epoch or self.target != address:
                 return
             try:
-                address = json.loads(out).get('address') if not code else None
-            except (ValueError, TypeError):
-                address = None
-            if address != self.target:
-                print('Reader page turn deferred: target is not focused', file=sys.stderr, flush=True)
+                window = pinned_window(out, address) if not code else {}
+            except (ValueError, TypeError, AttributeError):
+                window = {}
+            if not window.get('shown') or not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address)):
+                # On a workspace that is not on screen (or closed, which the next scan notices):
+                # turn when it is back.
+                print('Reader page turn deferred: the reading window is not on screen', file=sys.stderr, flush=True)
                 self.update('Waiting for the reading window')
-                self.scan()
                 return
             keys = self.pdf_keys()
-            if keys:
-                # A page that continues below the window is scrolled first; otherwise next page.
-                key = keys[1] if getattr(self, 'pdf_cut_off', False) else keys[0]
-                if not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address)):
-                    self.update('Waiting for the reading window')
-                    return
-                Task(self, ['hyprctl', 'dispatch', f'hl.dsp.send_shortcut({{ mods = "", key = "{key}", window = "address:{address}" }})'],
-                     self.page_turn_sent, timeout=3)
-            else:
-                Task(self, ['wtype', '-k', 'Right'], self.page_turn_sent, timeout=3)
-        Task(self, ['hyprctl', 'activewindow', '-j'], focused, timeout=3)
+            # A page that continues below the window is scrolled first; otherwise next page.
+            key = (keys[1] if getattr(self, 'pdf_cut_off', False) else keys[0]) if keys else 'Right'
+            Task(self, ['hyprctl', 'dispatch', f'hl.dsp.send_shortcut({{ mods = "", key = "{key}", window = "address:{address}" }})'],
+                 self.page_turn_sent, timeout=3)
+        Task(self, PINNED_QUERY, located, timeout=3)
 
     def page_turn_sent(self, code, out, err):
         if not self.enabled or self.paused:
@@ -1901,7 +1979,7 @@ class Reader(QObject):
             if command == 'on': self.set_enabled(True, notify=True)
             elif command == 'off': self.set_enabled(False, notify=True)
             elif command == 'toggle': self.set_enabled(not self.enabled, notify=True)
-            elif command == 'read': self.read_again()
+            elif command == 'read': self.read_again(repin=True)
             elif command == 'test-voice': self.test_voice()
             elif command == 'probe-provider': self.probe_provider(request['settings'])
             elif command == 'test-provider': self.test_provider(request['settings'], request.get('token'))
@@ -1987,6 +2065,11 @@ def main():
     app.aboutToQuit.connect(reader.shutdown)
     signal.signal(signal.SIGTERM, lambda *_: app.quit())
     signal.signal(signal.SIGINT, lambda *_: app.quit())
+    # Python runs signal handlers only between its own steps: wake it now and then, so
+    # `systemctl --user stop` ends the reader at once instead of after the stop timeout.
+    wake = QTimer()
+    wake.timeout.connect(lambda: None)
+    wake.start(300)
     return app.exec()
 
 

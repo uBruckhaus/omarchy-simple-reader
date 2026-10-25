@@ -82,13 +82,14 @@ class ReaderTests(unittest.TestCase):
         from reader import Reader
         subject = SimpleNamespace(
             enabled=True, paused=False, scanning=False, menu=Mock(), dialog=None,
-            settings={'follow': True}, last_text='Old page', got_window=Mock(),
-            is_speaking=lambda: True)
+            settings={'follow': True}, last_text='Old page', got_window=Mock(), got_pinned=Mock(),
+            is_speaking=lambda: True, target='0x123')
         subject.menu.isVisible.return_value = False
         with patch('reader.Task') as task:
             Reader.scan(subject)
         self.assertTrue(subject.scanning)
-        self.assertIs(task.call_args.args[2], subject.got_window)
+        self.assertIs(task.call_args.args[2], subject.got_pinned)
+        self.assertEqual(task.call_args.args[1], ['hyprctl', '--batch', 'j/clients;j/monitors'])
 
     def test_cancelling_ocr_releases_scan_flag(self):
         from reader import Reader
@@ -208,67 +209,156 @@ class ReaderTests(unittest.TestCase):
 if __name__ == '__main__':
     unittest.main()
 
-class FocusRegressionTests(unittest.TestCase):
-    def subject(self):
-        return SimpleNamespace(target='0x123', pending_window=None, epoch=7,
+class PinnedWindowTests(unittest.TestCase):
+    """The window reading starts in stays the book, wherever the focus goes."""
+    def subject(self, target='0x123'):
+        return SimpleNamespace(target=target, target_stable='1a', epoch=7, enabled=True, paused=False,
             scanning=True, scan=Mock(), stop_speech=Mock(), playing_file=None, captured=Mock(),
-            capture_window_geometry=([10, 20], [800, 600]),
-            target_title='Kindle', target_class='kindle',
-            custom_area=(10, 20, 800, 600), overlay=Mock())
+            capture_window_geometry=([10, 20], [800, 600]), update=Mock(), set_enabled=Mock(),
+            target_title='Kindle', target_class='kindle', settings={'kindle_crop': False},
+            custom_area=None, overlay=Mock(last_payload=None), is_kindle_target=lambda: False,
+            image_candidate=None, ocr_image=None, last_text='', candidate='',
+            capture_book=Mock())
 
-    def window(self, address):
+    def window(self, address, **extra):
         import json
-        return json.dumps(dict(address=address, pid=99999, at=[10, 20],
-                               size=[800, 600], title='Kindle', **{'class': 'kindle'}))
+        return json.dumps(dict(address=address, pid=99999, at=[10, 20], size=[800, 600],
+                               title='Kindle', **{'class': 'kindle'}, **extra))
 
-    def test_single_focus_change_keeps_current_audio(self):
+    def hyprctl(self, workspace=2, active=2, hidden=False, special=0):
+        import json
+        clients = [dict(address='0x456', workspace=dict(id=active)),
+                   dict(address='0x123', workspace=dict(id=workspace), hidden=hidden, stableId='1a')]
+        monitors = [dict(activeWorkspace=dict(id=active), specialWorkspace=dict(id=special))]
+        return json.dumps(clients, indent=4) + '\n\n\n' + json.dumps(monitors, indent=4)
+
+    def test_pinned_window_on_screen(self):
+        from reader import pinned_window
+        self.assertTrue(pinned_window(self.hyprctl(), '0x123')['shown'])
+        self.assertFalse(pinned_window(self.hyprctl(workspace=3), '0x123')['shown'])
+        self.assertFalse(pinned_window(self.hyprctl(hidden=True), '0x123')['shown'])
+        self.assertTrue(pinned_window(self.hyprctl(workspace=-98, special=-98), '0x123')['shown'])
+        self.assertEqual(pinned_window(self.hyprctl(), '0x999'), {})
+
+    def test_unpinned_reader_takes_the_focused_window(self):
+        from reader import Reader
+        subject = SimpleNamespace(enabled=True, paused=False, scanning=False, menu=Mock(), dialog=None,
+            settings={'follow': True}, last_text='', got_window=Mock(), target='')
+        subject.menu.isVisible.return_value = False
+        with patch('reader.Task') as task:
+            Reader.scan(subject)
+        self.assertEqual(task.call_args.args[1], ['hyprctl', 'activewindow', '-j'])
+
+    def test_focus_elsewhere_keeps_reading_the_book(self):
         from reader import Reader
         subject = self.subject()
-        with patch('reader.QTimer.singleShot') as timer, patch('reader.time.monotonic', return_value=10):
-            Reader.got_window(subject, 0, self.window('0x456'), '')
+        with patch('reader.Task') as task:
+            Reader.got_window(subject, 0, self.window('0x123', shown=True), '')
         subject.stop_speech.assert_not_called()
         self.assertEqual(subject.target, '0x123')
-        self.assertFalse(subject.scanning)
-        self.assertEqual(timer.call_args.args[0], 350)
+        task.assert_not_called()
+        subject.capture_book.assert_called_once()
+        self.assertEqual(subject.capture_book.call_args.args[0], '1a')
+        # The window's own picture has no overlay in it: the highlight is not hidden.
+        subject.overlay.show.assert_not_called()
 
-    def test_returning_focus_discards_pending_change(self):
+    def test_window_capture_crops_area_in_buffer_pixels(self):
         from reader import Reader
         subject = self.subject()
-        subject.pending_window = ('0x456', 10)
-        with patch('reader.Task'):
-            Reader.got_window(subject, 0, self.window('0x123'), '')
-        self.assertIsNone(subject.pending_window)
-        subject.stop_speech.assert_not_called()
-
-    def test_confirmed_change_switches_window(self):
-        from reader import Reader
-        subject = self.subject()
-        subject.pending_window = ('0x456', 10)
-        subject.update = Mock()
-        with patch('reader.Task'), patch('reader.time.monotonic', return_value=10.5):
-            Reader.got_window(subject, 0, self.window('0x456'), '')
-        subject.stop_speech.assert_called_once()
-        self.assertEqual(subject.target, '0x456')
-
-    def test_page_turn_does_not_type_into_different_window(self):
-        from reader import Reader
-        subject = SimpleNamespace(enabled=True, paused=False, epoch=7,
-            target='0x123', scan=Mock(), update=Mock(), page_turn_sent=Mock())
+        subject.image_width = lambda path: 1600
+        window = dict(at=[10, 20], size=[800, 600])
         with patch('reader.Task') as task:
-            Reader.do_page_turn(subject)
-            callback = task.call_args.args[2]
-            callback(0, self.window('0x456'), '')
-        self.assertEqual(task.call_count, 1)
+            Reader.capture_book(subject, '1a', window, (10, 52, 800, 568))
+            self.assertEqual(task.call_args.args[1][:4], ['grim', '-t', 'ppm', '-T'])
+            task.call_args.args[2](0, '', '')
+        argv = task.call_args.args[1]
+        self.assertEqual(argv[argv.index('-crop') + 1], '1600x1136+0+64')
+
+    def test_chosen_area_still_captures_the_screen(self):
+        from reader import Reader
+        subject = self.subject()
+        subject.custom_area = (10, 20, 800, 600)
+        with patch('reader.Task') as task:
+            Reader.got_window(subject, 0, self.window('0x123', shown=True), '')
+        subject.capture_book.assert_not_called()
+        argv = task.call_args.args[1]
+        self.assertEqual(argv[argv.index('-g') + 1], '10,20 800x600')
+
+    def test_book_off_screen_is_not_captured(self):
+        from reader import Reader
+        subject = self.subject()
+        with patch('reader.Task') as task:
+            Reader.got_window(subject, 0, self.window('0x123', shown=False), '')
+        task.assert_not_called()
+        subject.capture_book.assert_not_called()
+        subject.stop_speech.assert_not_called()
+        self.assertFalse(subject.scanning)
+
+    def test_closed_book_stops_reading(self):
+        from reader import Reader
+        subject = self.subject()
+        subject.got_window = lambda *a: Reader.got_window(subject, *a)
+        subject.book_closed = lambda: Reader.book_closed(subject)
+        with patch('reader.Task') as task, patch('reader.desktop_notify'):
+            Reader.got_pinned(subject, 0, self.hyprctl().replace('0x123', '0x999'), '')
+        task.assert_not_called()
+        subject.set_enabled.assert_called_once_with(False)
+
+    def test_waiting_for_the_book_scans_with_new_pages_off(self):
+        from reader import Reader
+        subject = SimpleNamespace(enabled=True, paused=False, scanning=False, menu=Mock(), dialog=None,
+            settings={'follow': False}, last_text='Read page', got_pinned=Mock(), target='0x123',
+            status='Waiting for the reading window')
+        subject.menu.isVisible.return_value = False
+        with patch('reader.Task') as task:
+            Reader.scan(subject)
+        task.assert_called_once()
+
+    def test_closed_book_stops_reading_with_new_pages_off(self):
+        from reader import Reader
+        subject = SimpleNamespace(enabled=True, paused=False, scanning=False, menu=Mock(), dialog=None,
+            settings={'follow': False}, last_text='Read page', target='0x123', status='Reading',
+            book_closed=Mock())
+        subject.menu.isVisible.return_value = False
+        subject.check_book_open = lambda *a: Reader.check_book_open(subject, *a)
+        with patch('reader.Task') as task:
+            Reader.scan(subject)
+        self.assertEqual(task.call_args.args[1], ['hyprctl', '--batch', 'j/clients;j/monitors'])
+        task.call_args.args[2](0, self.hyprctl(), '')
+        subject.book_closed.assert_not_called()
+        self.assertFalse(subject.scanning)
+        task.call_args.args[2](0, self.hyprctl().replace('0x123', '0x999'), '')
+        subject.book_closed.assert_called_once()
+
+    def test_read_again_repins(self):
+        from reader import Reader
+        subject = SimpleNamespace(enabled=True, target='0x123', stop_speech=Mock(), update=Mock(), scan=Mock())
+        Reader.read_again(subject, repin=True)
+        self.assertEqual(subject.target, '')
         subject.scan.assert_called_once()
 
-    def test_obsolete_focus_confirmation_cannot_restart_scan(self):
+    def page_turn(self, out, keys=None):
         from reader import Reader
-        subject = self.subject()
-        with patch('reader.QTimer.singleShot') as timer:
-            Reader.got_window(subject, 0, self.window('0x456'), '')
-        subject.epoch += 1
-        timer.call_args.args[1]()
-        subject.scan.assert_not_called()
+        subject = SimpleNamespace(enabled=True, paused=False, epoch=7, target='0x123',
+            pdf_keys=lambda: keys, update=Mock(), page_turn_sent=Mock())
+        with patch('reader.Task') as task:
+            Reader.do_page_turn(subject)
+            self.assertEqual(task.call_args.args[1], ['hyprctl', '--batch', 'j/clients;j/monitors'])
+            task.call_args.args[2](0, out, '')
+        return subject, task
+
+    def test_page_turn_goes_to_the_book_without_focus(self):
+        subject, task = self.page_turn(self.hyprctl())
+        self.assertEqual(task.call_count, 2)
+        argv = task.call_args.args[1]
+        self.assertEqual(argv[:2], ['hyprctl', 'dispatch'])
+        self.assertIn('key = "Right"', argv[2])
+        self.assertIn('window = "address:0x123"', argv[2])
+
+    def test_page_turn_waits_while_book_is_off_screen(self):
+        subject, task = self.page_turn(self.hyprctl(workspace=3))
+        self.assertEqual(task.call_count, 1)
+        subject.update.assert_called_once_with('Waiting for the reading window')
 
     def test_deferred_page_turn_resumes_after_focus_returns(self):
         from reader import Reader

@@ -43,7 +43,8 @@ ShellRoot {
                 root.target = state.target;
                 root.rectangles = state.rectangles;
             }
-            catch (error) { console.warn("Highlight state error", error); root.rectangles = []; }
+            // A bad read keeps the last good state instead of blinking it off.
+            catch (error) { console.warn("Highlight state error", error); }
         }
         onLoadFailed: root.rectangles = []
     }
@@ -53,7 +54,9 @@ ShellRoot {
             id: panel
             required property var modelData
             screen: modelData
-            visible: root.rectangles.length > 0 && root.target === root.activeAddress
+            // Stays mapped: unmapping per update runs the compositor's layer
+            // fade (Omarchy animates layers), so only the content is hidden.
+            visible: true
             anchors { top: true; bottom: true; left: true; right: true }
             color: "transparent"
             exclusionMode: ExclusionMode.Ignore
@@ -62,7 +65,7 @@ ShellRoot {
             WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
             mask: Region {}
             Repeater {
-                model: root.rectangles
+                model: root.target === root.activeAddress ? root.rectangles : []
                 Rectangle {
                     required property var modelData
                     x: modelData.x - panel.screen.x - 2

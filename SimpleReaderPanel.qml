@@ -7,6 +7,7 @@ import "native/Commons"
 import "native/Commons" as Commons
 import qs.Commons as Theme
 import "native/Ui" as Ui
+import qs.Ui as ShellUi
 
 Ui.Panel {
   id: root
@@ -290,14 +291,20 @@ Ui.Panel {
     if (bridge.running || !pending.length) return
     currentRequest = pending[0]; pending = pending.slice(1); bridge.running = true
   }
+  // Every reply, with the request it answers (ok false: refused or unreadable).
+  signal answered(var request, bool ok)
   function acceptResponse(text) {
+    var request = currentRequest
+    answered(request, handleResponse(text))
+  }
+  function handleResponse(text) {
     try {
       var data = JSON.parse(text)
-      if (data.error) { actionError = data.error; message = actionError; return }
+      if (data.error) { actionError = data.error; message = actionError; return false }
       if (currentRequest.command === "paste") {
         if (pasteTarget && data.clipboard) pasteTarget.insert(data.clipboard)
         pasteTarget = null
-        return
+        return true
       }
       if (currentRequest.command === "use-provider") {
         providerToken.text = ""
@@ -308,13 +315,15 @@ Ui.Panel {
       if (!loaded) rememberTranslatorToken = (data.settings || {}).remember_translator_token === true
       state = data; message = actionError || (data.setup_busy || data.setup_phase === "error" || data.setup_phase === "cancelled" ? data.setup_message : data.provider_status || data.status || "Ready"); loaded = true
       if (showProviders && selectedEngine !== "Online" && backendReady && !setupBusy && !sameSettings(state.probed_settings || {}, candidateBase())) probeCandidate()
-    } catch (e) { message = "Cannot read Screen Narrator response." }
+      return true
+    } catch (e) { message = "Cannot read Screen Narrator response."; return false }
   }
   Process {
     id: bridge
     command: ["python3", Qt.resolvedUrl("bridge.py").toString().replace(/^file:\/\//, "")]
     stdinEnabled: true
-    onStarted: write(JSON.stringify(root.currentRequest) + "\n")
+    // speedTicket only pairs a speed change with its reply inside the popup.
+    onStarted: write(JSON.stringify(root.currentRequest, function(key, value) { return key === "speedTicket" ? undefined : value }) + "\n")
     stdout: StdioCollector { onStreamFinished: root.acceptResponse(text) }
     onExited: Qt.callLater(root.nextRequest)
   }
@@ -416,6 +425,58 @@ Ui.Panel {
               Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: root.state.paused ? "▶  Resume" : "❚❚  Pause"; bordered: true; enabled: root.enabledReader; onClicked: root.request({command: "pause"}) }
               Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: "■  Stop"; tooltipText: "Stop reading (or right-click the bar icon)"; bordered: true; selected: root.enabledReader; enabled: root.enabledReader; onClicked: root.request({command: "off"}) }
             }
+            // Reading speed, like the GNOME version's menu: the shell's own slider. The chosen speed
+            // is shown until the reply to its own request arrives (older replies would move the knob
+            // back), and quick changes are saved together once they rest. Tab focuses it, ←/→ change it.
+            Item {
+              id: speedRow
+              property real pendingSpeed: 0
+              property int ticket: 0
+              readonly property real shownSpeed: pendingSpeed > 0 ? pendingSpeed : (root.config.speed || 1)
+              function choose(speed) {
+                pendingSpeed = Math.max(0.6, Math.min(2, Math.round(speed * 20) / 20))
+                speedSave.restart()
+              }
+              width: parent.width
+              height: speedSlider.implicitHeight
+              visible: root.backendReady
+              enabled: !root.setupBusy
+              activeFocusOnTab: true
+              Keys.onLeftPressed: choose(shownSpeed - 0.05)
+              Keys.onRightPressed: choose(shownSpeed + 0.05)
+              Accessible.role: Accessible.Slider
+              Accessible.name: "Reading speed"
+              Accessible.description: shownSpeed.toFixed(2) + "×"
+              Timer {
+                id: speedSave; interval: 350
+                onTriggered: {
+                  if (!root.backendReady || root.setupBusy) { speedRow.pendingSpeed = 0; return }
+                  speedRow.ticket += 1
+                  root.request({command: "configure", settings: {speed: speedRow.pendingSpeed}, speedTicket: speedRow.ticket})
+                }
+              }
+              Connections {
+                target: root
+                // The reply to the newest speed request ends the local value: confirmed, it is now
+                // the reader's speed; refused, the knob goes back to the reader's speed.
+                function onAnswered(request, ok) {
+                  if (request.speedTicket === speedRow.ticket && !speedSave.running) speedRow.pendingSpeed = 0
+                }
+              }
+              Rectangle { anchors.fill: parent; anchors.margins: -Style.space(4); radius: Style.cornerRadius; color: "transparent"; border.color: Theme.Color.accent; border.width: 1; visible: speedRow.activeFocus }
+              Text { id: speedIcon; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "󰓅"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4) }
+              ShellUi.PanelSlider {
+                id: speedSlider
+                anchors.left: speedIcon.right; anchors.leftMargin: Style.space(10)
+                anchors.right: speedValue.left; anchors.rightMargin: Style.space(10)
+                anchors.verticalCenter: parent.verticalCenter
+                bar: root.bar
+                minimum: 0.6; maximum: 2; step: 0.05
+                value: speedRow.shownSpeed
+                onReleased: function(v) { speedRow.choose(v) }
+              }
+              Text { id: speedValue; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; width: Style.space(44); horizontalAlignment: Text.AlignRight; text: (Math.round(speedSlider.liveValue * 20) / 20).toFixed(2) + "×"; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+            }
             Rectangle {
               id: nextStepCard
               width: parent.width
@@ -462,7 +523,7 @@ Ui.Panel {
                     spacing: Style.space(8)
                     Text { text: "󰗚"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
                     Text { id: readingGroupTitle; text: "Reading"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: "· " + root.languageInfo(root.config.language).label.split(" · ")[0] + " · " + Math.round((root.config.speed || 1) * 100) + " %"; color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                    Text { text: "· " + root.languageInfo(root.config.language).label.split(" · ")[0]; color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
                   }
                   Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showReadingGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
                   MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showReadingGroup = !root.showReadingGroup }
@@ -470,7 +531,6 @@ Ui.Panel {
                 Column {
                   width: parent.width; spacing: Style.spacing.md; visible: root.showReadingGroup
                   Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; width: parent.width; id: textLanguagePicker; label: "Text language"; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; options: root.languageOptions; value: root.config.language || "en"; onChanged: { root.set("language", value); textLanguagePicker.value = Qt.binding(function() { return root.config.language || "en" }) } }
-                  Ui.NumberField { label: "Reading speed (%)"; enabled: root.backendReady && !root.setupBusy; from: 60; to: 200; stepSize: 5; value: Math.round((root.config.speed || 1) * 100); onModified: root.set("speed", value / 100) }
                   Ui.Button { focusable: true; width: parent.width; bordered: true; selected: enabled; text: "󰁨  Set up automatically"; tooltipText: "Install what reading in this language still needs"; visible: root.readingNeeds !== ""; enabled: root.loaded && !root.enabledReader && !root.installBusy; onClicked: root.setupReading() }
                   Text { width: parent.width; text: root.readingNeeds !== "" ? "Installs " + root.readingNeeds + "." : (!root.translating && root.voiceBlocked ? root.voiceBlockedText : "✓ Everything for reading " + root.languageInfo(root.config.language).label.split(" · ")[0] + " is installed."); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
                   Flow {
@@ -481,7 +541,7 @@ Ui.Panel {
                   Column {
                     width: parent.width; spacing: Style.spacing.md; visible: root.showReadingOptions
                   Text { text: "Reading, PDF & Kindle"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
-                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Follow active window and page changes"; checked: root.config.follow !== false; onClicked: root.set("follow", !checked) }
+                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Follow page changes"; checked: root.config.follow !== false; onClicked: root.set("follow", !checked) }
                   Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Skip Kindle toolbar and margins"; checked: root.config.kindle_crop !== false; onClicked: root.set("kindle_crop", !checked) }
                   Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Read only the page in PDF viewers"; checked: root.config.pdf_page_area !== false; onClicked: root.set("pdf_page_area", !checked) }
                   Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Turn Kindle and PDF pages after reading"; checked: root.config.auto_page_turn !== false; onClicked: root.set("auto_page_turn", !checked) }
@@ -720,7 +780,7 @@ Ui.Panel {
           Repeater {
             model: [
               {title: "1. Reading Controls", body: "• ▶ Start, ❚❚ Pause and ■ Stop sit right under the summary. Right-click the bar icon to start or stop without opening the popup; the icon is green while reading.\n• First use: open Add / manage speech providers, choose Kokoro and a voice language, then Install Kokoro voice & reader. Test provider voice, then Use provider. Then Test voice or focus your text window and Start reading. Existing reader shortcuts can also be used; this plugin does not replace desktop shortcuts.\n• Pause/Resume controls playback; Read again restarts the current page.\n• Stop ends narration and reader-owned capture. Closing this popup leaves narration running.\n• On a subpage (provider setup, translation, this manual) Backspace returns to the reading controls; Esc closes the popup."},
-              {title: "2. Voice, Language & Speed", body: "• Choose the text language (51 languages) and a local voice for it. Kokoro speaks English, German, Spanish, French, Italian, Portuguese, Hindi, Japanese and Chinese; Piper covers all except Japanese.\n• Kokoro is the default local voice. Add / manage speech providers offers Kokoro and Piper installation, a Qwen file checklist, or a compatible speech server. Optional local voices appear only with their runtimes and models installed.\n• Online supports endpoint, model, voice and token configuration. Test provider voice, then Use provider. The active provider stays selected during setup.\n• Audio output chooses speakers or headphones for every provider. System default follows your desktop setting.\n• Set speed from 60% to 200%. Reading controls save immediately."},
+              {title: "2. Voice, Language & Speed", body: "• Choose the text language (51 languages) and a local voice for it. Kokoro speaks English, German, Spanish, French, Italian, Portuguese, Hindi, Japanese and Chinese; Piper covers all except Japanese.\n• Kokoro is the default local voice. Add / manage speech providers offers Kokoro and Piper installation, a Qwen file checklist, or a compatible speech server. Optional local voices appear only with their runtimes and models installed.\n• Online supports endpoint, model, voice and token configuration. Test provider voice, then Use provider. The active provider stays selected during setup.\n• Audio output chooses speakers or headphones for every provider. System default follows your desktop setting.\n• Set the speed with the slider under ▶ Start (0.60× to 2.00×; drag, click or scroll, or Tab to it and use ←/→). Reading controls save immediately."},
               {title: "3. Reading, PDF & Kindle", body: "• Follow active window and page changes enables continuous reading.\n• Kindle cropping skips the toolbar and margins.\n• In a PDF viewer (Evince, Papers) only the page is read: no toolbar, thumbnails or page numbers.\n• Automatic page turning advances Kindle and PDF pages after narration finishes and stops at the end of the document.\n• Manual page changes stop old speech and resume when the new text settles."},
               {title: "4. Reading Area & Highlighting", body: "• Select area closes the popup so you can choose a region.\n• Reset area returns to the full active window.\n• Highlighting follows the current speech chunk and hides when another window has focus."},
               {title: "5. Translation (optional)", body: "• Off by default. Turn it on under Translation → Speak in: the reader recognizes the text language and speaks the chosen language.\n• Set up a voice for the spoken language first: Add / manage speech providers… then uses that language.\n• Translator A — local LLM server (best quality, needs a GPU or patience):\n  – llama.cpp: install it (sudo pacman -S llama-cpp, or a GPU build from the llama.cpp releases), download an instruct GGUF model such as Gemma, Qwen or Llama, start it with  llama-server -m model.gguf --port 8080  and choose Server: llama.cpp.\n  – LM Studio: load a chat model, open Developer → Start server (port 1234), choose Server: LM Studio.\n  – Ollama: ollama pull gemma3 (or another chat model), keep ollama serve running, choose Server: Ollama.\n  – Refresh models lists the server's models; pick a chat/instruct model. Tokens are only for servers that require one.\n• Translator B — offline NLLB-200: Install offline translator downloads about 1.4 GB once. No server needed; runs on the CPU. License CC-BY-NC 4.0: non-commercial use only.\n• Test translation translates a sample sentence and shows the result without speaking.\n• Highlighting marks the original sentence while its translation is spoken. Remote HTTPS servers receive the recognized text."},

@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -80,8 +81,10 @@ class PageTurnTests(unittest.TestCase):
         subject = SimpleNamespace(enabled=True, paused=False, epoch=1, target=address, pdf_cut_off=cut_off,
                                   pdf_keys=lambda: ("n", "Next"), update=Mock(), scan=Mock(), page_turn_sent=Mock())
         def task(owner, args, done, timeout=0, **kw):
-            if args[0] == 'hyprctl' and args[1] == 'activewindow':
-                done(0, '{"address": "%s"}' % address, '')
+            if args[0] == 'hyprctl' and args[1] == '--batch':
+                # The book on the workspace that is on screen.
+                done(0, json.dumps([dict(address=address, workspace=dict(id=1))]) + '\n\n'
+                     + json.dumps([dict(activeWorkspace=dict(id=1), specialWorkspace=dict(id=0))]), '')
             else:
                 sent.append(args)
         with patch('reader.Task', side_effect=task):
