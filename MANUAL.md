@@ -6,6 +6,8 @@ Choose voice and text language (51 languages); set the reading speed (0.60×–2
 
 The integrated User Manual explains these controls in section cards. Existing reader shortcuts continue to work; this plugin does not install or replace shortcuts. The application launcher opens the bar popup. Speech engines and OCR stay in the existing local reader service.
 
+The **Panel** group sets the popup's **Corners** (like windows, 6 px, 12 px or square) and **F12 saves a screenshot** (on by default). With it on, F12 (no Ctrl, Shift, Alt or Super) saves a picture of the popup only, drawn by Qt, to `~/Pictures/Screen Narrator/` (private folder, `0600` files) and asks *What is wrong? (optional)*; Enter or Done saves the note next to it as `.txt`, Esc skips it. Nothing is sent anywhere. See the README for details.
+
 ## Provider, voice and audio output
 
 The main panel always shows the **active provider**, voice, language and readiness.

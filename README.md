@@ -27,6 +27,13 @@ setup stays separate from active settings until you test and activate it. Readin
 options expand PDF, Kindle, following, highlighting and area controls. Advanced contains
 manual files and maintenance. See [MANUAL.md](MANUAL.md) for the full setup flow.
 
+The **Panel** group sets how the popup itself looks and the F12 key:
+
+- **Corners:** *Like windows (… px)* (the default) follows Hyprland's window rounding (`decoration:rounding`, as the shell reads it), *Slightly rounded (6 px)*, *Rounded (12 px)* or *Square*. It rounds the popup's frame, its cards and manual sections, buttons, drop-downs and their lists, text fields, switches and tool tips (frame, cards, lists and tool tips at the full radius, buttons, drop-downs and fields at most 8 px; switches round, or square in *Square*). The reading-speed slider is the shell's own and keeps its round track and knob; the bar icon and the reading highlight keep their own look.
+- **F12 saves a screenshot** (on by default), see *F12: a screenshot of the popup* below.
+
+Both are stored in the widget's own entry in `~/.config/omarchy/shell.json` (`"corners"`, and `"screenshotKey": false` when switched off); the defaults are stored as no key. The reading settings stay with the reader service as before.
+
 **51 languages.** Kokoro speaks English, German, Spanish, French, Italian, Portuguese,
 Hindi, Japanese and Chinese (about 330–354 MB plus runtime packages; Japanese adds a
 270 MB pronunciation dictionary). Piper covers the other languages with one voice each (60–122 MB plus a separate pinned runtime). Setup
@@ -80,6 +87,18 @@ Removing the widget preserves reader settings, models and an existing reader ser
 
 OCR and local speech stay on your machine. Screenshots and generated audio use a private runtime directory and are cleaned when reading stops. The window focused when reading starts stays the book until reading stops, the book is closed or **Read again** / **Read active window** picks the focused window instead; you can work in other windows meanwhile, even over it. Screenshots of the book are taken from the window itself (`grim -T`), so windows over it are not read and the highlight stays visible while pages are checked; only a selected reading area is captured from the screen. The reader optionally follows page changes and can highlight the passage being read (the highlight shows while the book has focus). Automatic page turning sends a Right-arrow key to the book's Kindle window, or the next-page key `n` to the book's PDF viewer window, through `hyprctl dispatch hl.dsp.send_shortcut`, which does not raise or focus it; on a workspace that is not on screen the turn waits until the book is back. Closing the popup leaves narration running; Stop cancels reader-owned work and playback. Online speech sends recognized text to your chosen HTTPS provider after Start, as described below.
 
+### F12: a screenshot of the popup, with a note
+
+While the popup is open, **F12** (without Ctrl, Shift, Alt or Super) saves a picture of the popup, for telling what is wrong with it:
+
+- **Only on F12.** Nothing is captured at any other time, and only the popup itself: Qt draws the popup's own content into the picture (`grabToImage`). No screen capture tool runs, nothing else on the screen (not the book you are reading) is in it, and nothing is uploaded or sent anywhere. The reader service is not involved.
+- **Where:** `~/Pictures/Screen Narrator/screen-narrator-<date>-<time>.png` (the pictures folder from `~/.config/user-dirs.dirs` when it is set there). The popup then names the file and asks **What is wrong? (optional)**; **Enter** or **Done** saves the text next to the picture as a `.txt` with the same name (at most 4000 characters; no text, no file), **Esc** skips it, and closing the popup keeps what was typed.
+- **Private files:** the folder is made `0700` when missing and only used when it is a real folder (not a link) of yours that no one else can write to; pictures and notes are new `0600` files, never written through a link or over an existing file (`-2`, `-3` … are added instead), and a picture that cannot be written completely is removed again.
+- **How:** the popup first writes the picture into its own folder `$XDG_RUNTIME_DIR/ubruckhaus.simple-reader-shot/` (`0700`, in memory, cleared after ten minutes at the latest). `shot_save.py` (Python standard library, system `python3`) is then started with a fixed argument list, never through a shell: `prepare <plugin id>`, `save <picture> "Screen Narrator"` (checks that the picture is a regular file of yours in that folder, at most 32 MiB and a PNG, copies it as above and removes it), and `note <picture> "Screen Narrator"` with the note on its standard input. Each call answers with one line of JSON.
+- **Off:** switch **F12 saves a screenshot** off in the **Panel** group; F12 then does nothing in this popup.
+
+Screenshots you took with F12 stay in `~/Pictures/Screen Narrator/` until you delete them, also after removing the plugin.
+
 ## Voice availability
 
 Kokoro and Piper offer guided installation; Qwen offers a checklist for an existing
@@ -127,6 +146,8 @@ bash -n setup.sh
 python3 -m unittest discover -s tests
 QT_QPA_PLATFORM=offscreen QT_QPA_PLATFORMTHEME= QT_STYLE_OVERRIDE=Fusion ~/.local/share/kindle-reader/venv/bin/python -m unittest discover -s reader -p 'test_*.py'
 ```
+
+`PanelShotNative.qml`, `shot_save.py` (with `tests/test_shot_save.py`) and `corners.js` come from the author's shared plugin kit and are the same in Video Trans.
 
 MIT license. Vendored Omarchy controls retain their upstream MIT notice in `native/LICENSE`; see `THIRD_PARTY_NOTICES.md`.
 

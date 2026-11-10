@@ -8,6 +8,7 @@ import "native/Commons" as Commons
 import qs.Commons as Theme
 import "native/Ui" as Ui
 import qs.Ui as ShellUi
+import "corners.js" as Corners
 
 Ui.Panel {
   id: root
@@ -34,6 +35,20 @@ Ui.Panel {
   property bool rememberTranslatorToken: false
   property bool showVoiceGroup: false
   property bool showReadingGroup: false
+  property bool showPanelGroup: false
+  // Corners (radius: cards, frame, pop-ups; control: buttons, drop-downs, fields; small: badges;
+  // pill: round switches) and the F12 screenshot key, from the widget's shell.json entry (the
+  // reading settings stay with the reader service). "Like windows" is Hyprland's rounding.
+  readonly property string cornersSetting: Corners.choice(hostWidget ? String(hostWidget.cornersSetting) : "windows")
+  readonly property var corners: Corners.sizes(cornersSetting, Theme.Style.cornerRadius)
+  readonly property bool screenshotKey: hostWidget ? hostWidget.screenshotKey !== false : true
+  readonly property string cornersLabel: {
+    var options = Corners.options(shot.t, Theme.Style.cornerRadius)
+    for (var i = 0; i < options.length; i++) if (options[i].value === cornersSetting) return options[i].label
+    return cornersSetting
+  }
+  // The vendored controls (native/Ui) take their radii from the vendored Style.
+  Binding { target: Style; property: "cornerRadius"; value: root.corners.radius; restoreMode: Binding.RestoreNone }
   // Desktop notifications appear behind this popup, so warnings and errors are repeated here.
   property double dismissedNotice: 0  // ids are millisecond timestamps (beyond int range)
   readonly property var latestNotice: {
@@ -338,473 +353,521 @@ Ui.Panel {
     owner: root.hostWidget || root
     open: root.opened
     contentWidth: fittedContentWidth(Style.space(460))
-    contentHeight: fittedContentHeight(content.implicitHeight)
-    Flickable {
-      id: panelScroll
+    // At least as tall as the screenshot note while it shows.
+    contentHeight: fittedContentHeight(Math.max(content.implicitHeight, shot.neededHeight))
+    // F12: a picture of this popup into ~/Pictures/Screen Narrator, then an optional note
+    // (PanelShotNative.qml, shared; the content's key handler leaves F12 to it).
+    PanelShotNative {
+      id: shot
       anchors.fill: parent
-      contentWidth: width
-      contentHeight: content.implicitHeight
-      clip: true
-      boundsBehavior: Flickable.StopAtBounds
-      Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
-      Column {
-        id: content
-        width: parent.width
-        focus: root.opened
-        spacing: Style.space(12)
-        Keys.onEscapePressed: root.close()
-        Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Backspace && root.goBack()) event.accepted = true
-        }
-        Item {
-          width: parent.width
-          height: Style.space(28)
-          Text {
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            text: "Screen Narrator"
-            color: Theme.Color.accent
-            font.family: Theme.Style.font.family
-            font.pixelSize: Theme.Style.font.title
-            font.bold: true
-          }
-          Ui.Button { focusable: true;
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            implicitHeight: Style.space(24)
-            text: root.showManualView ? "✕ Close Manual" : "📖 User Manual"
-            fontSize: Style.font.caption
-            bordered: true
-            selected: root.showManualView
-            onClicked: root.showManualView = !root.showManualView
-          }
-        }
-        Text { width: parent.width; text: "Read screen text, PDFs and Kindle pages aloud."; color: Commons.Color.foreground; opacity: 0.65; font.family: Style.font.family; font.pixelSize: Style.font.body }
-        Rectangle {
-          width: parent.width
-          visible: root.latestNotice !== null
-          height: visible ? noticeText.implicitHeight + Style.space(16) : 0
-          radius: Style.cornerRadius
-          color: Qt.rgba(Theme.Color.accent.r, Theme.Color.accent.g, Theme.Color.accent.b, 0.18)
-          border.color: Theme.Color.accent
-          border.width: Math.max(1, Style.space(2))
-          Text {
-            id: noticeText
-            anchors.left: parent.left; anchors.right: noticeClose.left; anchors.verticalCenter: parent.verticalCenter
-            anchors.leftMargin: Style.space(10); anchors.rightMargin: Style.space(6)
-            text: root.latestNotice ? (root.latestNotice.level === "error" ? "⚠  " : "ⓘ  ") + root.latestNotice.title + "\n" + root.latestNotice.text : ""
-            textFormat: Text.PlainText; wrapMode: Text.Wrap
-            color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption
-          }
-          Ui.Button {
-            id: noticeClose
-            anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(4)
-            focusable: true; text: "✕"; fontSize: Style.font.caption; tooltipText: "Dismiss"
-            onClicked: root.dismissedNotice = root.latestNotice ? root.latestNotice.id : root.dismissedNotice
-          }
-        }
+      pluginId: "ubruckhaus.simple-reader"
+      folderName: "Screen Narrator"
+      active: root.screenshotKey
+      panelOpen: root.opened
+      returnFocus: content
+      corners: root.corners
+      Flickable {
+        id: panelScroll
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: content.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        Controls.ScrollBar.vertical: Controls.ScrollBar { policy: Controls.ScrollBar.AsNeeded }
         Column {
+          id: content
           width: parent.width
-          spacing: Style.spacing.md
-          visible: !root.showManualView
-          Column {
+          focus: root.opened
+          spacing: Style.space(12)
+          // While the screenshot note shows, its keys go to it (PanelShotNative).
+          Keys.onEscapePressed: function(event) {
+            if (shot.overlayOpen) { event.accepted = false; return }
+            root.close()
+          }
+          Keys.onPressed: function(event) {
+            if (shot.overlayOpen) return
+            if (event.key === Qt.Key_Backspace && root.goBack()) event.accepted = true
+          }
+          Item {
             width: parent.width
-            spacing: Style.spacing.md
-            visible: !root.showProviders && !root.showTranslation
-            Rectangle {
-              width: parent.width
-              height: activeSummary.implicitHeight + Style.space(20)
-              radius: Style.cornerRadius
-              color: Qt.rgba(Theme.Color.accent.r, Theme.Color.accent.g, Theme.Color.accent.b, 0.12)
-              border.color: Theme.Color.accent
-              Text { id: activeSummary; anchors.fill: parent; anchors.margins: Style.space(10); text: root.providerSummary; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
+            height: Style.space(28)
+            Text {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Screen Narrator"
+              color: Theme.Color.accent
+              font.family: Theme.Style.font.family
+              font.pixelSize: Theme.Style.font.title
+              font.bold: true
             }
-            Row {
-              width: parent.width; spacing: Style.spacing.md
-              Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: "▶  Start"; tooltipText: "Start reading the focused window (or right-click the bar icon)"; bordered: true; selected: !root.enabledReader && enabled && root.state.can_start !== false; enabled: root.loaded && !root.setupBusy && !root.state.kokoro_checking && !root.state.installing_kokoro && root.backendReady && !root.enabledReader; onClicked: root.request({command: "on"}) }
-              Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: root.state.paused ? "▶  Resume" : "❚❚  Pause"; bordered: true; enabled: root.enabledReader; onClicked: root.request({command: "pause"}) }
-              Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: "■  Stop"; tooltipText: "Stop reading (or right-click the bar icon)"; bordered: true; selected: root.enabledReader; enabled: root.enabledReader; onClicked: root.request({command: "off"}) }
-            }
-            // Reading speed, like the GNOME version's menu: the shell's own slider. The chosen speed
-            // is shown until the reply to its own request arrives (older replies would move the knob
-            // back), and quick changes are saved together once they rest. Tab focuses it, ←/→ change it.
-            Item {
-              id: speedRow
-              property real pendingSpeed: 0
-              property int ticket: 0
-              readonly property real shownSpeed: pendingSpeed > 0 ? pendingSpeed : (root.config.speed || 1)
-              function choose(speed) {
-                pendingSpeed = Math.max(0.6, Math.min(2, Math.round(speed * 20) / 20))
-                speedSave.restart()
-              }
-              width: parent.width
-              height: speedSlider.implicitHeight
-              visible: root.backendReady
-              enabled: !root.setupBusy
-              activeFocusOnTab: true
-              Keys.onLeftPressed: choose(shownSpeed - 0.05)
-              Keys.onRightPressed: choose(shownSpeed + 0.05)
-              Accessible.role: Accessible.Slider
-              Accessible.name: "Reading speed"
-              Accessible.description: shownSpeed.toFixed(2) + "×"
-              Timer {
-                id: speedSave; interval: 350
-                onTriggered: {
-                  if (!root.backendReady || root.setupBusy) { speedRow.pendingSpeed = 0; return }
-                  speedRow.ticket += 1
-                  root.request({command: "configure", settings: {speed: speedRow.pendingSpeed}, speedTicket: speedRow.ticket})
-                }
-              }
-              Connections {
-                target: root
-                // The reply to the newest speed request ends the local value: confirmed, it is now
-                // the reader's speed; refused, the knob goes back to the reader's speed.
-                function onAnswered(request, ok) {
-                  if (request.speedTicket === speedRow.ticket && !speedSave.running) speedRow.pendingSpeed = 0
-                }
-              }
-              Rectangle { anchors.fill: parent; anchors.margins: -Style.space(4); radius: Style.cornerRadius; color: "transparent"; border.color: Theme.Color.accent; border.width: 1; visible: speedRow.activeFocus }
-              Text { id: speedIcon; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "󰓅"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4) }
-              ShellUi.PanelSlider {
-                id: speedSlider
-                anchors.left: speedIcon.right; anchors.leftMargin: Style.space(10)
-                anchors.right: speedValue.left; anchors.rightMargin: Style.space(10)
-                anchors.verticalCenter: parent.verticalCenter
-                bar: root.bar
-                minimum: 0.6; maximum: 2; step: 0.05
-                value: speedRow.shownSpeed
-                onReleased: function(v) { speedRow.choose(v) }
-              }
-              Text { id: speedValue; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; width: Style.space(44); horizontalAlignment: Text.AlignRight; text: (Math.round(speedSlider.liveValue * 20) / 20).toFixed(2) + "×"; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            }
-            Rectangle {
-              id: nextStepCard
-              width: parent.width
-              visible: !root.enabledReader && (root.nextStep !== null || root.installBusy)
-              height: visible ? nextStepColumn.implicitHeight + Style.space(20) : 0
-              radius: Style.cornerRadius
-              color: Qt.rgba(Theme.Color.accent.r, Theme.Color.accent.g, Theme.Color.accent.b, 0.10)
-              border.color: Theme.Color.accent
-              Column {
-                id: nextStepColumn
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
-                spacing: Style.spacing.md
-                Text { width: parent.width; text: root.installBusy ? "Installing…" : "Not ready yet" + (root.failedChecks.length > 1 ? " · step 1 of " + root.failedChecks.length : ""); color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
-                Text { width: parent.width; text: root.installBusy ? root.installMessage : (root.nextStep ? root.nextStep.problem : ""); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                Ui.Button { focusable: true; width: parent.width; visible: !root.installBusy && root.nextStep !== null; selected: true; bordered: true; text: root.nextStep && root.nextStep.fixes.length ? root.nextStep.fixes[0].label : ""; onClicked: root.applyFix(root.nextStep.fixes[0]) }
-                Ui.Button { focusable: true; visible: root.installBusy && root.setupBusy; enabled: root.state.setup_phase !== "packages"; bordered: true; text: "Cancel"; onClicked: root.request({command: "cancel-setup"}) }
-                Text { visible: !root.installBusy && root.nextStep !== null && root.nextStep.fixes.length > 1; text: root.showMoreFixes ? "▾ Other options" : "▸ Other options"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption
-                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showMoreFixes = !root.showMoreFixes } }
-                Flow {
-                  width: parent.width; spacing: Style.spacing.md; visible: root.showMoreFixes && !root.installBusy && root.nextStep !== null
-                  Repeater {
-                    model: root.nextStep ? root.nextStep.fixes.slice(1) : []
-                    Ui.Button { required property var modelData; focusable: true; bordered: true; text: modelData.label; fontSize: Style.font.caption; onClicked: root.applyFix(modelData) }
-                  }
-                }
-              }
-            }
-            Text { width: parent.width; visible: !root.enabledReader && root.nextStep === null && !root.installBusy && root.state.can_start === true; text: "✓ Ready. Focus the window you want to read, then press ▶ Start."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Text { width: parent.width; text: "Status: " + (root.message === "Off" ? "not reading" : root.message); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Rectangle {
-              width: parent.width
-              height: readingGroup.implicitHeight + Style.space(20)
-              radius: Style.cornerRadius
-              color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
-              border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
-              Column {
-                id: readingGroup
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
-                spacing: Style.spacing.md
-                Item {
-                  width: parent.width; height: Math.max(readingGroupTitle.implicitHeight, Style.space(22))
-                  Row {
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(8)
-                    Text { text: "󰗚"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
-                    Text { id: readingGroupTitle; text: "Reading"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: "· " + root.languageInfo(root.config.language).label.split(" · ")[0]; color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                  }
-                  Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showReadingGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showReadingGroup = !root.showReadingGroup }
-                }
-                Column {
-                  width: parent.width; spacing: Style.spacing.md; visible: root.showReadingGroup
-                  Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; width: parent.width; id: textLanguagePicker; label: "Text language"; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; options: root.languageOptions; value: root.config.language || "en"; onChanged: { root.set("language", value); textLanguagePicker.value = Qt.binding(function() { return root.config.language || "en" }) } }
-                  Ui.Button { focusable: true; width: parent.width; bordered: true; selected: enabled; text: "󰁨  Set up automatically"; tooltipText: "Install what reading in this language still needs"; visible: root.readingNeeds !== ""; enabled: root.loaded && !root.enabledReader && !root.installBusy; onClicked: root.setupReading() }
-                  Text { width: parent.width; text: root.readingNeeds !== "" ? "Installs " + root.readingNeeds + "." : (!root.translating && root.voiceBlocked ? root.voiceBlockedText : "✓ Everything for reading " + root.languageInfo(root.config.language).label.split(" · ")[0] + " is installed."); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                  Flow {
-                    width: parent.width; spacing: Style.spacing.md
-                    Ui.Button { focusable: true; text: "Read again"; bordered: true; enabled: root.enabledReader && !root.state.testing_voice; onClicked: root.request({command: "read"}) }
-                  }
-                  Ui.Button { focusable: true; width: parent.width; text: root.showReadingOptions ? "▾ Reading options" : "▸ Reading options"; bordered: true; onClicked: root.showReadingOptions = !root.showReadingOptions }
-                  Column {
-                    width: parent.width; spacing: Style.spacing.md; visible: root.showReadingOptions
-                  Text { text: "Reading, PDF & Kindle"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
-                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Follow page changes"; checked: root.config.follow !== false; onClicked: root.set("follow", !checked) }
-                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Skip Kindle toolbar and margins"; checked: root.config.kindle_crop !== false; onClicked: root.set("kindle_crop", !checked) }
-                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Read only the page in PDF viewers"; checked: root.config.pdf_page_area !== false; onClicked: root.set("pdf_page_area", !checked) }
-                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Turn Kindle and PDF pages after reading"; checked: root.config.auto_page_turn !== false; onClicked: root.set("auto_page_turn", !checked) }
-                  Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Highlight the passage being read"; checked: root.config.highlight !== false; onClicked: root.set("highlight", !checked) }
-                  Ui.PanelSeparator {}
-                  Text { text: "Reading Area"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
-                  Text { width: parent.width; text: root.state.custom_area ? "Custom reading area selected" : root.config.kindle_area ? "Saved Kindle reading area" : "Full active window"; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                  Flow {
-                    width: parent.width
-                    spacing: Style.spacing.md
-                    Ui.Button { focusable: true; text: "Select area…"; enabled: root.backendReady && !root.setupBusy; bordered: true;  onClicked: { root.close(); selectionDelay.start() } }
-                    Ui.Button { focusable: true; text: "Reset area"; enabled: root.backendReady && !root.setupBusy; bordered: true;  onClicked: root.request({command: "clear-area"}) }
-                  }
-                  }
-                }
-              }
-            }
-            Rectangle {
-              width: parent.width
-              height: voiceGroup.implicitHeight + Style.space(20)
-              radius: Style.cornerRadius
-              color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
-              border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
-              Column {
-                id: voiceGroup
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
-                spacing: Style.spacing.md
-                Item {
-                  width: parent.width; height: Math.max(voiceGroupTitle.implicitHeight, Style.space(22))
-                  Row {
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(8)
-                    Text { text: "󰕾"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
-                    Text { id: voiceGroupTitle; text: "Voice"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: "· " + root.activeVoiceLabel + (root.activeVoiceLabel.indexOf(root.activeEngine) >= 0 ? "" : " · " + root.activeEngine); color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                  }
-                  Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showVoiceGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showVoiceGroup = !root.showVoiceGroup }
-                }
-                Column {
-                  width: parent.width; spacing: Style.spacing.md; visible: root.showVoiceGroup
-                  Ui.Dropdown { id: activeProviderPicker; width: parent.width; label: "Speech provider"; options: root.providerOptions(); value: root.activeEngine; enabled: !root.enabledReader && !root.setupBusy; onChanged: { root.manageProvider(value); activeProviderPicker.value = Qt.binding(function() { return root.activeEngine }) } }
-                  Ui.Dropdown { width: parent.width; label: "Voice / speaker"; visible: root.activeEngine !== "Online"; options: root.activeVoices; value: root.config.voice || ""; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; onChanged: root.request({command: "configure", settings: {provider: "Local", voice: value}}) }
-                  Column {
-                    width: parent.width; spacing: Style.space(4); visible: root.activeEngine === "Online"
-                    Ui.PanelSectionHeader { text: "Voice / speaker" }
-                    Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.config.online_voice || ""; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; placeholderText: "Speech server voice ID"; onEditingFinished: root.set("online_voice", text) }
-                  }
-                  Ui.Dropdown { width: parent.width; label: "Audio output · speakers / headphones"; options: root.state.audio_outputs || [{value: "auto", label: "System default"}]; value: root.config.audio_output || "auto"; enabled: root.backendReady && !root.setupBusy; onChanged: root.set("audio_output", value) }
-                  Text { width: parent.width; visible: (root.config.audio_output || "auto") !== "auto" && !(root.state.audio_outputs || []).some(function(v) { return v.value === root.config.audio_output }); text: "Selected audio output is disconnected. Reconnect it or choose System default."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                  Flow {
-                    width: parent.width; spacing: Style.spacing.md
-                    Ui.Button { focusable: true; text: "Test voice"; bordered: true; enabled: root.backendReady && root.voiceReady && !root.enabledReader && !root.setupBusy && !root.state.installing_kokoro && !root.state.kokoro_checking; onClicked: root.request({command: "test-voice"}) }
-                  }
-                  Ui.Button { focusable: true; width: parent.width; text: "Add / manage speech providers…"; bordered: true; enabled: !root.enabledReader && !root.setupBusy; onClicked: root.showProviders ? root.showProviders = false : root.manageProvider(root.activeEngine) }
-                }
-              }
-            }
-            Rectangle {
-              width: parent.width
-              height: translationGroup.implicitHeight + Style.space(20)
-              radius: Style.cornerRadius
-              color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
-              border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
-              Column {
-                id: translationGroup
-                anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
-                spacing: Style.spacing.md
-                Item {
-                  width: parent.width; height: Math.max(translationGroupTitle.implicitHeight, Style.space(22))
-                  Row {
-                    anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
-                    spacing: Style.space(8)
-                    Text { text: "󰗊"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
-                    Text { id: translationGroupTitle; text: "Translation"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
-                    Text { text: "· " + (root.translating ? "→ " + root.languageInfo(root.config.translate_to).label.split(" · ")[0] : "off"); color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
-                  }
-                  Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showTranslationGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
-                  MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showTranslationGroup = !root.showTranslationGroup }
-                }
-                Column {
-                  width: parent.width; spacing: Style.spacing.md; visible: root.showTranslationGroup
-                  Ui.Toggle { width: parent.width; label: "Translate before reading"; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; checked: root.translating; onClicked: root.set("translate_to", root.translating ? "" : root.defaultTranslationTarget()) }
-                  Column {
-                    width: parent.width; spacing: Style.spacing.md; visible: root.translating
-                    Ui.SearchableDropdown { id: groupTranslateTo; placeholderText: "Type to filter languages…"; width: parent.width; label: "Read " + root.languageInfo(root.config.language).label.split(" · ")[0] + " text aloud in"; enabled: !root.enabledReader; options: root.languageOptions.filter(function(o) { return o.value !== root.config.language }); value: root.config.translate_to || ""; onChanged: { root.set("translate_to", value); groupTranslateTo.value = Qt.binding(function() { return root.config.translate_to || "" }) } }
-                    Text { width: parent.width; text: "Translator: " + (root.config.translator === "nllb" ? "offline NLLB-200 on this computer" : (root.config.translator_model ? root.config.translator_model + " · " + root.config.translator_endpoint : "not chosen yet")); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                    Ui.Button { focusable: true; width: parent.width; bordered: true; selected: enabled; text: "󰁨  Set up automatically"; tooltipText: "Install what translating into this language still needs"; visible: root.translationNeeds !== ""; enabled: root.loaded && !root.enabledReader && !root.installBusy; onClicked: root.setupTranslation() }
-                    Text { width: parent.width; text: root.translationProblem !== "" ? root.translationProblem : (root.translationNeeds !== "" ? "Installs " + root.translationNeeds + "." : root.voiceBlocked ? root.voiceBlockedText : "✓ Everything for reading in " + root.languageInfo(root.config.translate_to).label.split(" · ")[0] + " is installed."); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                    Ui.Button { focusable: true; bordered: true; text: "Translation settings…"; fontSize: Style.font.caption; onClicked: root.showTranslation = true }
-                  }
-                }
-              }
+            Ui.Button { focusable: true;
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              implicitHeight: Style.space(24)
+              text: root.showManualView ? "✕ Close Manual" : "📖 User Manual"
+              fontSize: Style.font.caption
+              bordered: true
+              selected: root.showManualView
+              onClicked: root.showManualView = !root.showManualView
             }
           }
-          Ui.Button { focusable: true; width: parent.width; visible: root.showProviders; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.closeProviders() }
-          Text { width: parent.width; visible: root.showProviders && root.setupBusy; text: root.state.setup_message || "Setting up…"; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-          Ui.Button { focusable: true; text: "Cancel setup"; visible: root.showProviders && root.setupBusy; enabled: root.state.setup_phase !== "packages"; bordered: true; onClicked: root.request({command: "cancel-setup"}) }
+          Text { width: parent.width; text: "Read screen text, PDFs and Kindle pages aloud."; color: Commons.Color.foreground; opacity: 0.65; font.family: Style.font.family; font.pixelSize: Style.font.body }
+          Rectangle {
+            width: parent.width
+            visible: root.latestNotice !== null
+            height: visible ? noticeText.implicitHeight + Style.space(16) : 0
+            radius: root.corners.radius
+            color: Qt.rgba(Theme.Color.accent.r, Theme.Color.accent.g, Theme.Color.accent.b, 0.18)
+            border.color: Theme.Color.accent
+            border.width: Math.max(1, Style.space(2))
+            Text {
+              id: noticeText
+              anchors.left: parent.left; anchors.right: noticeClose.left; anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(10); anchors.rightMargin: Style.space(6)
+              text: root.latestNotice ? (root.latestNotice.level === "error" ? "⚠  " : "ⓘ  ") + root.latestNotice.title + "\n" + root.latestNotice.text : ""
+              textFormat: Text.PlainText; wrapMode: Text.Wrap
+              color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption
+            }
+            Ui.Button {
+              id: noticeClose
+              anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(4)
+              focusable: true; text: "✕"; fontSize: Style.font.caption; tooltipText: "Dismiss"
+              onClicked: root.dismissedNotice = root.latestNotice ? root.latestNotice.id : root.dismissedNotice
+            }
+          }
           Column {
-            id: providerSettings
             width: parent.width
             spacing: Style.spacing.md
-            visible: root.showProviders
-            enabled: !root.enabledReader && !root.setupBusy
-            Text { text: "Set up speech provider"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
-            Text { width: parent.width; text: "1. Choose and set up  ·  2. Test voice  ·  3. Use provider\nYour active provider stays selected until you choose Use provider."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Ui.Dropdown { id: setupProviderPicker; width: parent.width; label: "Provider to set up"; options: root.providerOptions(); value: root.selectedEngine; onChanged: { root.engineChoice = value; root.candidateVoice = ""; root.showAdvanced = false; root.probeCandidate(); setupProviderPicker.value = Qt.binding(function() { return root.selectedEngine }) } }
-            Ui.Button { focusable: true; width: parent.width; text: "Set up reader runtime"; visible: !root.backendReady && root.selectedEngine !== "Kokoro" && root.selectedEngine !== "Piper"; bordered: true; onClicked: root.request({command: "setup", language: root.installLanguage, backend_only: true}) }
+            visible: !root.showManualView
             Column {
-              width: parent.width; spacing: Style.spacing.md
-              visible: root.selectedEngine === "Kokoro" || root.selectedEngine === "Piper"
-              Text { width: parent.width; text: root.selectedEngine === "Kokoro" ? (root.kokoroSupportsLanguage ? "Local speech. Download about 330–354 MB plus runtime packages" + (root.installLanguage === "ja" ? " and a Japanese pronunciation dictionary (about 270 MB)" : "") + ". No separate AI server needed." : "Kokoro has no " + root.installLanguageName + " voice. Piper offers a local " + root.installLanguageName + " voice (about " + root.languageInfo(root.installLanguage).piper_mb + " MB).") : !root.piperSupportsLanguage ? "Piper has no working " + root.installLanguageName + " voice. Kokoro offers local " + root.installLanguageName + " voices." : "Local speech. Install Piper and a " + root.installLanguageName + " voice. Voice download about " + root.languageInfo(root.installLanguage).piper_mb + " MB plus runtime packages. Existing reader packages stay separate."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-              Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; id: installLanguagePicker; width: parent.width; label: root.translating ? "Spoken language (translation target)" : "Reading language"; options: root.languageOptions; value: root.installLanguage; onChanged: { root.candidateLanguage = value; root.candidateVoice = ""; root.probeCandidate(); installLanguagePicker.value = Qt.binding(function() { return root.installLanguage }) } }
-              Ui.Button { focusable: true; width: parent.width; text: root.engineLacksLanguage ? "Set up " + (root.selectedEngine === "Kokoro" ? "Piper" : "Kokoro") + " for " + root.installLanguageName + " instead" : root.selectedEngine === "Kokoro" ? (root.kokoroSelectedInstalled ? "Repair Kokoro / reader" : "Install Kokoro voice & reader") : "Install / repair Piper voice & reader"; bordered: true; onClicked: root.engineLacksLanguage ? root.switchInstallEngine() : root.selectedEngine === "Kokoro" ? root.setup() : root.request({command: "setup", engine: "piper", language: root.installLanguage, backend_only: true}) }
-
-            }
-            Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; width: parent.width; visible: root.selectedEngine === "Qwen" || root.selectedEngine === "Online"; id: serverLanguagePicker; label: "Text language"; options: root.languageOptions; value: root.installLanguage; onChanged: { root.candidateLanguage = value; root.candidateVoice = ""; root.probeCandidate(); serverLanguagePicker.value = Qt.binding(function() { return root.installLanguage }) } }
-            Column {
-              width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Qwen"
-              Text { width: parent.width; text: "Qwen uses an existing llama.cpp TTS runner, two compatible models and a speaker recording. Automatic Qwen downloads are not available. Complete the checklist below; existing files are detected automatically."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-              Repeater {
-                model: [{key: "qwen_runner", label: "1. Speech runner", help: "Choose the llama.cpp TTS executable."}, {key: "qwen_model", label: "2. Voice model", help: "Choose the Qwen 1.7B backbone (.gguf)."}, {key: "qwen_projection", label: "3. Audio model", help: "Choose its matching audio projection (.gguf)."}, {key: "qwen_speaker", label: "4. Speaker recording", help: "Choose a clear voice recording (.wav)."}]
-                delegate: Column {
-                  required property var modelData
-                  width: parent.width; spacing: Style.space(4)
-                  Ui.PanelSectionHeader { text: modelData.label }
-                  Text { width: parent.width; text: modelData.help; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                  Ui.Button { focusable: true; width: parent.width; text: root.candidatePath(modelData.key) ? "Change file… · " + root.candidatePath(modelData.key).split("/").pop() : "Choose file…"; bordered: true; onClicked: root.chooseFile(modelData.key) }
+              width: parent.width
+              spacing: Style.spacing.md
+              visible: !root.showProviders && !root.showTranslation
+              Rectangle {
+                width: parent.width
+                height: activeSummary.implicitHeight + Style.space(20)
+                radius: root.corners.radius
+                color: Qt.rgba(Theme.Color.accent.r, Theme.Color.accent.g, Theme.Color.accent.b, 0.12)
+                border.color: Theme.Color.accent
+                Text { id: activeSummary; anchors.fill: parent; anchors.margins: Style.space(10); text: root.providerSummary; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
+              }
+              Row {
+                width: parent.width; spacing: Style.spacing.md
+                Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: "▶  Start"; tooltipText: "Start reading the focused window (or right-click the bar icon)"; bordered: true; selected: !root.enabledReader && enabled && root.state.can_start !== false; enabled: root.loaded && !root.setupBusy && !root.state.kokoro_checking && !root.state.installing_kokoro && root.backendReady && !root.enabledReader; onClicked: root.request({command: "on"}) }
+                Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: root.state.paused ? "▶  Resume" : "❚❚  Pause"; bordered: true; enabled: root.enabledReader; onClicked: root.request({command: "pause"}) }
+                Ui.Button { focusable: true; width: (parent.width - 2 * Style.spacing.md) / 3; text: "■  Stop"; tooltipText: "Stop reading (or right-click the bar icon)"; bordered: true; selected: root.enabledReader; enabled: root.enabledReader; onClicked: root.request({command: "off"}) }
+              }
+              // Reading speed, like the GNOME version's menu: the shell's own slider. The chosen speed
+              // is shown until the reply to its own request arrives (older replies would move the knob
+              // back), and quick changes are saved together once they rest. Tab focuses it, ←/→ change it.
+              Item {
+                id: speedRow
+                property real pendingSpeed: 0
+                property int ticket: 0
+                readonly property real shownSpeed: pendingSpeed > 0 ? pendingSpeed : (root.config.speed || 1)
+                function choose(speed) {
+                  pendingSpeed = Math.max(0.6, Math.min(2, Math.round(speed * 20) / 20))
+                  speedSave.restart()
+                }
+                width: parent.width
+                height: speedSlider.implicitHeight
+                visible: root.backendReady
+                enabled: !root.setupBusy
+                activeFocusOnTab: true
+                Keys.onLeftPressed: choose(shownSpeed - 0.05)
+                Keys.onRightPressed: choose(shownSpeed + 0.05)
+                Accessible.role: Accessible.Slider
+                Accessible.name: "Reading speed"
+                Accessible.description: shownSpeed.toFixed(2) + "×"
+                Timer {
+                  id: speedSave; interval: 350
+                  onTriggered: {
+                    if (!root.backendReady || root.setupBusy) { speedRow.pendingSpeed = 0; return }
+                    speedRow.ticket += 1
+                    root.request({command: "configure", settings: {speed: speedRow.pendingSpeed}, speedTicket: speedRow.ticket})
+                  }
+                }
+                Connections {
+                  target: root
+                  // The reply to the newest speed request ends the local value: confirmed, it is now
+                  // the reader's speed; refused, the knob goes back to the reader's speed.
+                  function onAnswered(request, ok) {
+                    if (request.speedTicket === speedRow.ticket && !speedSave.running) speedRow.pendingSpeed = 0
+                  }
+                }
+                Rectangle { anchors.fill: parent; anchors.margins: -Style.space(4); radius: root.corners.control; color: "transparent"; border.color: Theme.Color.accent; border.width: 1; visible: speedRow.activeFocus }
+                Text { id: speedIcon; anchors.left: parent.left; anchors.verticalCenter: parent.verticalCenter; text: "󰓅"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4) }
+                ShellUi.PanelSlider {
+                  id: speedSlider
+                  anchors.left: speedIcon.right; anchors.leftMargin: Style.space(10)
+                  anchors.right: speedValue.left; anchors.rightMargin: Style.space(10)
+                  anchors.verticalCenter: parent.verticalCenter
+                  bar: root.bar
+                  minimum: 0.6; maximum: 2; step: 0.05
+                  value: speedRow.shownSpeed
+                  onReleased: function(v) { speedRow.choose(v) }
+                }
+                Text { id: speedValue; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; width: Style.space(44); horizontalAlignment: Text.AlignRight; text: (Math.round(speedSlider.liveValue * 20) / 20).toFixed(2) + "×"; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              }
+              Rectangle {
+                id: nextStepCard
+                width: parent.width
+                visible: !root.enabledReader && (root.nextStep !== null || root.installBusy)
+                height: visible ? nextStepColumn.implicitHeight + Style.space(20) : 0
+                radius: root.corners.radius
+                color: Qt.rgba(Theme.Color.accent.r, Theme.Color.accent.g, Theme.Color.accent.b, 0.10)
+                border.color: Theme.Color.accent
+                Column {
+                  id: nextStepColumn
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
+                  spacing: Style.spacing.md
+                  Text { width: parent.width; text: root.installBusy ? "Installing…" : "Not ready yet" + (root.failedChecks.length > 1 ? " · step 1 of " + root.failedChecks.length : ""); color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
+                  Text { width: parent.width; text: root.installBusy ? root.installMessage : (root.nextStep ? root.nextStep.problem : ""); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                  Ui.Button { focusable: true; width: parent.width; visible: !root.installBusy && root.nextStep !== null; selected: true; bordered: true; text: root.nextStep && root.nextStep.fixes.length ? root.nextStep.fixes[0].label : ""; onClicked: root.applyFix(root.nextStep.fixes[0]) }
+                  Ui.Button { focusable: true; visible: root.installBusy && root.setupBusy; enabled: root.state.setup_phase !== "packages"; bordered: true; text: "Cancel"; onClicked: root.request({command: "cancel-setup"}) }
+                  Text { visible: !root.installBusy && root.nextStep !== null && root.nextStep.fixes.length > 1; text: root.showMoreFixes ? "▾ Other options" : "▸ Other options"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showMoreFixes = !root.showMoreFixes } }
+                  Flow {
+                    width: parent.width; spacing: Style.spacing.md; visible: root.showMoreFixes && !root.installBusy && root.nextStep !== null
+                    Repeater {
+                      model: root.nextStep ? root.nextStep.fixes.slice(1) : []
+                      Ui.Button { required property var modelData; focusable: true; bordered: true; text: modelData.label; fontSize: Style.font.caption; onClicked: root.applyFix(modelData) }
+                    }
+                  }
+                }
+              }
+              Text { width: parent.width; visible: !root.enabledReader && root.nextStep === null && !root.installBusy && root.state.can_start === true; text: "✓ Ready. Focus the window you want to read, then press ▶ Start."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Text { width: parent.width; text: "Status: " + (root.message === "Off" ? "not reading" : root.message); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Rectangle {
+                width: parent.width
+                height: readingGroup.implicitHeight + Style.space(20)
+                radius: root.corners.radius
+                color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
+                border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
+                Column {
+                  id: readingGroup
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
+                  spacing: Style.spacing.md
+                  Item {
+                    width: parent.width; height: Math.max(readingGroupTitle.implicitHeight, Style.space(22))
+                    Row {
+                      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(8)
+                      Text { text: "󰗚"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
+                      Text { id: readingGroupTitle; text: "Reading"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                      Text { text: "· " + root.languageInfo(root.config.language).label.split(" · ")[0]; color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                    }
+                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showReadingGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showReadingGroup = !root.showReadingGroup }
+                  }
+                  Column {
+                    width: parent.width; spacing: Style.spacing.md; visible: root.showReadingGroup
+                    Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; width: parent.width; id: textLanguagePicker; label: "Text language"; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; options: root.languageOptions; value: root.config.language || "en"; onChanged: { root.set("language", value); textLanguagePicker.value = Qt.binding(function() { return root.config.language || "en" }) } }
+                    Ui.Button { focusable: true; width: parent.width; bordered: true; selected: enabled; text: "󰁨  Set up automatically"; tooltipText: "Install what reading in this language still needs"; visible: root.readingNeeds !== ""; enabled: root.loaded && !root.enabledReader && !root.installBusy; onClicked: root.setupReading() }
+                    Text { width: parent.width; text: root.readingNeeds !== "" ? "Installs " + root.readingNeeds + "." : (!root.translating && root.voiceBlocked ? root.voiceBlockedText : "✓ Everything for reading " + root.languageInfo(root.config.language).label.split(" · ")[0] + " is installed."); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    Flow {
+                      width: parent.width; spacing: Style.spacing.md
+                      Ui.Button { focusable: true; text: "Read again"; bordered: true; enabled: root.enabledReader && !root.state.testing_voice; onClicked: root.request({command: "read"}) }
+                    }
+                    Ui.Button { focusable: true; width: parent.width; text: root.showReadingOptions ? "▾ Reading options" : "▸ Reading options"; bordered: true; onClicked: root.showReadingOptions = !root.showReadingOptions }
+                    Column {
+                      width: parent.width; spacing: Style.spacing.md; visible: root.showReadingOptions
+                    Text { text: "Reading, PDF & Kindle"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
+                    Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Follow page changes"; checked: root.config.follow !== false; onClicked: root.set("follow", !checked) }
+                    Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Skip Kindle toolbar and margins"; checked: root.config.kindle_crop !== false; onClicked: root.set("kindle_crop", !checked) }
+                    Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Read only the page in PDF viewers"; checked: root.config.pdf_page_area !== false; onClicked: root.set("pdf_page_area", !checked) }
+                    Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Turn Kindle and PDF pages after reading"; checked: root.config.auto_page_turn !== false; onClicked: root.set("auto_page_turn", !checked) }
+                    Ui.Toggle { width: parent.width; enabled: root.backendReady && !root.setupBusy; label: "Highlight the passage being read"; checked: root.config.highlight !== false; onClicked: root.set("highlight", !checked) }
+                    Ui.PanelSeparator {}
+                    Text { text: "Reading Area"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
+                    Text { width: parent.width; text: root.state.custom_area ? "Custom reading area selected" : root.config.kindle_area ? "Saved Kindle reading area" : "Full active window"; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    Flow {
+                      width: parent.width
+                      spacing: Style.spacing.md
+                      Ui.Button { focusable: true; text: "Select area…"; enabled: root.backendReady && !root.setupBusy; bordered: true;  onClicked: { root.close(); selectionDelay.start() } }
+                      Ui.Button { focusable: true; text: "Reset area"; enabled: root.backendReady && !root.setupBusy; bordered: true;  onClicked: root.request({command: "clear-area"}) }
+                    }
+                    }
+                  }
+                }
+              }
+              Rectangle {
+                width: parent.width
+                height: voiceGroup.implicitHeight + Style.space(20)
+                radius: root.corners.radius
+                color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
+                border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
+                Column {
+                  id: voiceGroup
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
+                  spacing: Style.spacing.md
+                  Item {
+                    width: parent.width; height: Math.max(voiceGroupTitle.implicitHeight, Style.space(22))
+                    Row {
+                      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(8)
+                      Text { text: "󰕾"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
+                      Text { id: voiceGroupTitle; text: "Voice"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                      Text { text: "· " + root.activeVoiceLabel + (root.activeVoiceLabel.indexOf(root.activeEngine) >= 0 ? "" : " · " + root.activeEngine); color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                    }
+                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showVoiceGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showVoiceGroup = !root.showVoiceGroup }
+                  }
+                  Column {
+                    width: parent.width; spacing: Style.spacing.md; visible: root.showVoiceGroup
+                    Ui.Dropdown { id: activeProviderPicker; width: parent.width; label: "Speech provider"; options: root.providerOptions(); value: root.activeEngine; enabled: !root.enabledReader && !root.setupBusy; onChanged: { root.manageProvider(value); activeProviderPicker.value = Qt.binding(function() { return root.activeEngine }) } }
+                    Ui.Dropdown { width: parent.width; label: "Voice / speaker"; visible: root.activeEngine !== "Online"; options: root.activeVoices; value: root.config.voice || ""; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; onChanged: root.request({command: "configure", settings: {provider: "Local", voice: value}}) }
+                    Column {
+                      width: parent.width; spacing: Style.space(4); visible: root.activeEngine === "Online"
+                      Ui.PanelSectionHeader { text: "Voice / speaker" }
+                      Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.config.online_voice || ""; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; placeholderText: "Speech server voice ID"; onEditingFinished: root.set("online_voice", text) }
+                    }
+                    Ui.Dropdown { width: parent.width; label: "Audio output · speakers / headphones"; options: root.state.audio_outputs || [{value: "auto", label: "System default"}]; value: root.config.audio_output || "auto"; enabled: root.backendReady && !root.setupBusy; onChanged: root.set("audio_output", value) }
+                    Text { width: parent.width; visible: (root.config.audio_output || "auto") !== "auto" && !(root.state.audio_outputs || []).some(function(v) { return v.value === root.config.audio_output }); text: "Selected audio output is disconnected. Reconnect it or choose System default."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    Flow {
+                      width: parent.width; spacing: Style.spacing.md
+                      Ui.Button { focusable: true; text: "Test voice"; bordered: true; enabled: root.backendReady && root.voiceReady && !root.enabledReader && !root.setupBusy && !root.state.installing_kokoro && !root.state.kokoro_checking; onClicked: root.request({command: "test-voice"}) }
+                    }
+                    Ui.Button { focusable: true; width: parent.width; text: "Add / manage speech providers…"; bordered: true; enabled: !root.enabledReader && !root.setupBusy; onClicked: root.showProviders ? root.showProviders = false : root.manageProvider(root.activeEngine) }
+                  }
+                }
+              }
+              Rectangle {
+                width: parent.width
+                height: translationGroup.implicitHeight + Style.space(20)
+                radius: root.corners.radius
+                color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
+                border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
+                Column {
+                  id: translationGroup
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
+                  spacing: Style.spacing.md
+                  Item {
+                    width: parent.width; height: Math.max(translationGroupTitle.implicitHeight, Style.space(22))
+                    Row {
+                      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(8)
+                      Text { text: "󰗊"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
+                      Text { id: translationGroupTitle; text: "Translation"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                      Text { text: "· " + (root.translating ? "→ " + root.languageInfo(root.config.translate_to).label.split(" · ")[0] : "off"); color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                    }
+                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showTranslationGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showTranslationGroup = !root.showTranslationGroup }
+                  }
+                  Column {
+                    width: parent.width; spacing: Style.spacing.md; visible: root.showTranslationGroup
+                    Ui.Toggle { width: parent.width; label: "Translate before reading"; enabled: root.backendReady && !root.setupBusy && !root.enabledReader; checked: root.translating; onClicked: root.set("translate_to", root.translating ? "" : root.defaultTranslationTarget()) }
+                    Column {
+                      width: parent.width; spacing: Style.spacing.md; visible: root.translating
+                      Ui.SearchableDropdown { id: groupTranslateTo; placeholderText: "Type to filter languages…"; width: parent.width; label: "Read " + root.languageInfo(root.config.language).label.split(" · ")[0] + " text aloud in"; enabled: !root.enabledReader; options: root.languageOptions.filter(function(o) { return o.value !== root.config.language }); value: root.config.translate_to || ""; onChanged: { root.set("translate_to", value); groupTranslateTo.value = Qt.binding(function() { return root.config.translate_to || "" }) } }
+                      Text { width: parent.width; text: "Translator: " + (root.config.translator === "nllb" ? "offline NLLB-200 on this computer" : (root.config.translator_model ? root.config.translator_model + " · " + root.config.translator_endpoint : "not chosen yet")); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                      Ui.Button { focusable: true; width: parent.width; bordered: true; selected: enabled; text: "󰁨  Set up automatically"; tooltipText: "Install what translating into this language still needs"; visible: root.translationNeeds !== ""; enabled: root.loaded && !root.enabledReader && !root.installBusy; onClicked: root.setupTranslation() }
+                      Text { width: parent.width; text: root.translationProblem !== "" ? root.translationProblem : (root.translationNeeds !== "" ? "Installs " + root.translationNeeds + "." : root.voiceBlocked ? root.voiceBlockedText : "✓ Everything for reading in " + root.languageInfo(root.config.translate_to).label.split(" · ")[0] + " is installed."); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                      Ui.Button { focusable: true; bordered: true; text: "Translation settings…"; fontSize: Style.font.caption; onClicked: root.showTranslation = true }
+                    }
+                  }
+                }
+              }
+              Rectangle {
+                width: parent.width
+                height: panelGroup.implicitHeight + Style.space(20)
+                radius: root.corners.radius
+                color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.04)
+                border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.14)
+                Column {
+                  id: panelGroup
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: Style.space(10)
+                  spacing: Style.spacing.md
+                  Item {
+                    width: parent.width; height: Math.max(panelGroupTitle.implicitHeight, Style.space(22))
+                    Row {
+                      anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter
+                      spacing: Style.space(8)
+                      Text { text: "󰏘"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body + Style.space(4); anchors.verticalCenter: parent.verticalCenter }
+                      Text { id: panelGroupTitle; text: "Panel"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true; anchors.verticalCenter: parent.verticalCenter }
+                      Text { text: "· " + root.cornersLabel + " · F12 " + (root.screenshotKey ? "on" : "off"); color: Commons.Color.foreground; opacity: 0.7; elide: Text.ElideRight; width: parent.width - Style.space(150); font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.verticalCenter: parent.verticalCenter }
+                    }
+                    Text { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; text: root.showPanelGroup ? "▾" : "▸"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showPanelGroup = !root.showPanelGroup }
+                  }
+                  Column {
+                    width: parent.width; spacing: Style.spacing.md; visible: root.showPanelGroup
+                    Ui.Dropdown { id: cornersPicker; width: parent.width; label: shot.t("corners"); options: Corners.options(shot.t, Theme.Style.cornerRadius); value: root.cornersSetting; onChanged: function(picked) { if (root.hostWidget && typeof root.hostWidget.setCorners === "function") root.hostWidget.setCorners(picked); cornersPicker.value = Qt.binding(function() { return root.cornersSetting }) } }
+                    Text { width: parent.width; text: shot.t("cornersHint"); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.8; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    Ui.Toggle { width: parent.width; label: shot.t("shotKey"); description: shot.t("shotKeyHint", ["Screen Narrator"]); checked: root.screenshotKey; onClicked: if (root.hostWidget && typeof root.hostWidget.setScreenshotKey === "function") root.hostWidget.setScreenshotKey(!checked) }
+                  }
                 }
               }
             }
+            Ui.Button { focusable: true; width: parent.width; visible: root.showProviders; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.closeProviders() }
+            Text { width: parent.width; visible: root.showProviders && root.setupBusy; text: root.state.setup_message || "Setting up…"; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+            Ui.Button { focusable: true; text: "Cancel setup"; visible: root.showProviders && root.setupBusy; enabled: root.state.setup_phase !== "packages"; bordered: true; onClicked: root.request({command: "cancel-setup"}) }
             Column {
-              width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Online"
-              Text { width: parent.width; text: "Connect an OpenAI-compatible speech server. Remote servers receive the text being read and may charge for speech. Localhost servers can stay on this device."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-              Ui.PanelSectionHeader { text: "Server address" }
-              Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.onlineEndpoint; placeholderText: "https://your-server/v1"; onTextChanged: root.onlineEndpoint = text }
-              Ui.PanelSectionHeader { text: "Speech model" }
-              Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.onlineModel; placeholderText: "Speech model ID"; onTextChanged: root.onlineModel = text }
-              Ui.PanelSectionHeader { text: "Voice / speaker" }
-              Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.onlineVoice; placeholderText: "Voice ID"; onTextChanged: root.onlineVoice = text }
-              Ui.PanelSectionHeader { text: "API key / token (if required)" }
-              Ui.TextField { pasteHandler: root.pasteInto; id: providerToken; width: parent.width; password: true; placeholderText: root.state.key_ready && root.onlineEndpoint === root.config.online_endpoint ? "Existing token will be used · enter to replace" : "Enter token, or leave empty for a local server" }
-              Ui.Toggle { width: parent.width; label: "Remember token on this device"; checked: root.rememberToken; onClicked: root.rememberToken = !checked }
-              Text { width: parent.width; visible: root.rememberToken; text: "Saved tokens are stored in an owner-only plaintext file."; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            }
-            Ui.Dropdown { width: parent.width; visible: root.selectedEngine !== "Online"; label: "Voice / speaker to test"; options: root.candidateVoices; value: root.candidateVoice || (root.candidateVoices.length ? root.candidateVoices[0].value : ""); onChanged: root.candidateVoice = value }
-            Text { width: parent.width; text: root.candidateReady() ? "Voice is available. Test it through the selected audio output before activating." : "Setup needed. Install a voice or supply the required settings above."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Flow {
-              width: parent.width; spacing: Style.spacing.md
-              Ui.Button { focusable: true; text: "Test provider voice"; bordered: true; enabled: root.candidateReady() && !root.state.installing_kokoro && !root.state.kokoro_checking; onClicked: root.testCandidate() }
-              Ui.Button { focusable: true; text: "Use provider"; bordered: true; enabled: root.candidateReady() && root.candidateVerified() && !root.state.installing_kokoro && !root.state.kokoro_checking; onClicked: root.useCandidate() }
-            }
-            Text { width: parent.width; text: "Status: " + (root.message === "Off" ? "not reading" : root.message); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.actionError ? Theme.Color.accent : Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Text { width: parent.width; visible: root.candidateVerified(); text: "Voice test passed. Choose Use provider to activate."; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Ui.Button { focusable: true; width: parent.width; text: root.showAdvanced ? "▾ Advanced · files & maintenance" : "▸ Advanced · files & maintenance"; bordered: true; onClicked: root.showAdvanced = !root.showAdvanced }
-            Column {
-              width: parent.width; spacing: Style.spacing.md; visible: root.showAdvanced
+              id: providerSettings
+              width: parent.width
+              spacing: Style.spacing.md
+              visible: root.showProviders
+              enabled: !root.enabledReader && !root.setupBusy
+              Text { text: "Set up speech provider"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
+              Text { width: parent.width; text: "1. Choose and set up  ·  2. Test voice  ·  3. Use provider\nYour active provider stays selected until you choose Use provider."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Ui.Dropdown { id: setupProviderPicker; width: parent.width; label: "Provider to set up"; options: root.providerOptions(); value: root.selectedEngine; onChanged: { root.engineChoice = value; root.candidateVoice = ""; root.showAdvanced = false; root.probeCandidate(); setupProviderPicker.value = Qt.binding(function() { return root.selectedEngine }) } }
+              Ui.Button { focusable: true; width: parent.width; text: "Set up reader runtime"; visible: !root.backendReady && root.selectedEngine !== "Kokoro" && root.selectedEngine !== "Piper"; bordered: true; onClicked: root.request({command: "setup", language: root.installLanguage, backend_only: true}) }
               Column {
-                width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Kokoro"
-                Ui.Button { focusable: true; width: parent.width; text: root.state.kokoro_checking ? "Checking model updates…" : "Check for model updates"; enabled: root.backendReady && !root.state.kokoro_checking && !root.state.installing_kokoro; onClicked: root.request({command: "check-kokoro-updates", language: root.installLanguage}) }
-                Text { width: parent.width; text: ((root.state.kokoro_updates || {})[root.installLanguage] || {}).message || ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                Ui.Button { focusable: true; width: parent.width; text: root.state.installing_kokoro ? "Updating model…" : "Update selected Kokoro model"; visible: ((root.state.kokoro_updates || {})[root.installLanguage] || {}).available === true; enabled: !root.state.installing_kokoro && !root.state.kokoro_checking; bordered: true; onClicked: root.request({command: "update-kokoro", language: root.installLanguage}) }
-                Ui.Button { focusable: true; text: "Cancel model update"; visible: root.state.installing_kokoro === true; onClicked: root.request({command: "cancel-kokoro-install"}) }
+                width: parent.width; spacing: Style.spacing.md
+                visible: root.selectedEngine === "Kokoro" || root.selectedEngine === "Piper"
+                Text { width: parent.width; text: root.selectedEngine === "Kokoro" ? (root.kokoroSupportsLanguage ? "Local speech. Download about 330–354 MB plus runtime packages" + (root.installLanguage === "ja" ? " and a Japanese pronunciation dictionary (about 270 MB)" : "") + ". No separate AI server needed." : "Kokoro has no " + root.installLanguageName + " voice. Piper offers a local " + root.installLanguageName + " voice (about " + root.languageInfo(root.installLanguage).piper_mb + " MB).") : !root.piperSupportsLanguage ? "Piper has no working " + root.installLanguageName + " voice. Kokoro offers local " + root.installLanguageName + " voices." : "Local speech. Install Piper and a " + root.installLanguageName + " voice. Voice download about " + root.languageInfo(root.installLanguage).piper_mb + " MB plus runtime packages. Existing reader packages stay separate."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; id: installLanguagePicker; width: parent.width; label: root.translating ? "Spoken language (translation target)" : "Reading language"; options: root.languageOptions; value: root.installLanguage; onChanged: { root.candidateLanguage = value; root.candidateVoice = ""; root.probeCandidate(); installLanguagePicker.value = Qt.binding(function() { return root.installLanguage }) } }
+                Ui.Button { focusable: true; width: parent.width; text: root.engineLacksLanguage ? "Set up " + (root.selectedEngine === "Kokoro" ? "Piper" : "Kokoro") + " for " + root.installLanguageName + " instead" : root.selectedEngine === "Kokoro" ? (root.kokoroSelectedInstalled ? "Repair Kokoro / reader" : "Install Kokoro voice & reader") : "Install / repair Piper voice & reader"; bordered: true; onClicked: root.engineLacksLanguage ? root.switchInstallEngine() : root.selectedEngine === "Kokoro" ? root.setup() : root.request({command: "setup", engine: "piper", language: root.installLanguage, backend_only: true}) }
+
               }
-              Repeater {
-                model: root.selectedEngine === "Piper" ? [{key: "piper_runner", label: "Piper executable"}, {key: "piper_model", label: "Voice model (.onnx)"}, {key: "piper_config", label: "Voice configuration (.json)"}] : root.selectedEngine === "Qwen" ? [{key: "qwen_runner", label: "llama.cpp TTS executable"}, {key: "qwen_model", label: "Qwen backbone (.gguf)"}, {key: "qwen_projection", label: "Audio projection (.gguf)"}, {key: "qwen_speaker", label: "Speaker recording (.wav)"}] : []
-                delegate: Column {
-                  required property var modelData
-                  width: parent.width; spacing: Style.space(4)
-                  Ui.PanelSectionHeader { text: modelData.label }
-                  Row {
-                    width: parent.width; spacing: Style.spacing.md
-                    Ui.TextField { pasteHandler: root.pasteInto; width: parent.width - browseButton.width - parent.spacing; text: root.candidatePath(modelData.key); placeholderText: "Absolute file path or ~/"; onEditingFinished: root.setCandidatePath(modelData.key, text) }
-                    Ui.Button { focusable: true; id: browseButton; text: "Browse…"; onClicked: root.chooseFile(modelData.key) }
+              Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; width: parent.width; visible: root.selectedEngine === "Qwen" || root.selectedEngine === "Online"; id: serverLanguagePicker; label: "Text language"; options: root.languageOptions; value: root.installLanguage; onChanged: { root.candidateLanguage = value; root.candidateVoice = ""; root.probeCandidate(); serverLanguagePicker.value = Qt.binding(function() { return root.installLanguage }) } }
+              Column {
+                width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Qwen"
+                Text { width: parent.width; text: "Qwen uses an existing llama.cpp TTS runner, two compatible models and a speaker recording. Automatic Qwen downloads are not available. Complete the checklist below; existing files are detected automatically."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                Repeater {
+                  model: [{key: "qwen_runner", label: "1. Speech runner", help: "Choose the llama.cpp TTS executable."}, {key: "qwen_model", label: "2. Voice model", help: "Choose the Qwen 1.7B backbone (.gguf)."}, {key: "qwen_projection", label: "3. Audio model", help: "Choose its matching audio projection (.gguf)."}, {key: "qwen_speaker", label: "4. Speaker recording", help: "Choose a clear voice recording (.wav)."}]
+                  delegate: Column {
+                    required property var modelData
+                    width: parent.width; spacing: Style.space(4)
+                    Ui.PanelSectionHeader { text: modelData.label }
+                    Text { width: parent.width; text: modelData.help; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                    Ui.Button { focusable: true; width: parent.width; text: root.candidatePath(modelData.key) ? "Change file… · " + root.candidatePath(modelData.key).split("/").pop() : "Choose file…"; bordered: true; onClicked: root.chooseFile(modelData.key) }
                   }
                 }
               }
               Column {
                 width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Online"
-                Text { width: parent.width; text: "The server must support /v1/audio/speech with WAV output. Model discovery is available for the active connection; it may include chat models which cannot speak."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-                Ui.Button { focusable: true; text: "Refresh active server models"; enabled: root.backendReady && !root.state.models_loading; onClicked: root.request({command: "online-models"}) }
-                Ui.SearchableDropdown { placeholderText: "Type to filter models…"; width: parent.width; label: "Discovered models"; options: root.state.online_models || []; value: root.onlineModel; onChanged: root.onlineModel = value }
-                Ui.Button { focusable: true; text: "Clear active server token"; enabled: root.backendReady; onClicked: root.request({command: "configure-token", token: "", remember_token: false}) }
+                Text { width: parent.width; text: "Connect an OpenAI-compatible speech server. Remote servers receive the text being read and may charge for speech. Localhost servers can stay on this device."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                Ui.PanelSectionHeader { text: "Server address" }
+                Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.onlineEndpoint; placeholderText: "https://your-server/v1"; onTextChanged: root.onlineEndpoint = text }
+                Ui.PanelSectionHeader { text: "Speech model" }
+                Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.onlineModel; placeholderText: "Speech model ID"; onTextChanged: root.onlineModel = text }
+                Ui.PanelSectionHeader { text: "Voice / speaker" }
+                Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.onlineVoice; placeholderText: "Voice ID"; onTextChanged: root.onlineVoice = text }
+                Ui.PanelSectionHeader { text: "API key / token (if required)" }
+                Ui.TextField { pasteHandler: root.pasteInto; id: providerToken; width: parent.width; password: true; placeholderText: root.state.key_ready && root.onlineEndpoint === root.config.online_endpoint ? "Existing token will be used · enter to replace" : "Enter token, or leave empty for a local server" }
+                Ui.Toggle { width: parent.width; label: "Remember token on this device"; checked: root.rememberToken; onClicked: root.rememberToken = !checked }
+                Text { width: parent.width; visible: root.rememberToken; text: "Saved tokens are stored in an owner-only plaintext file."; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
               }
-            }
-          }
-          Ui.Button { focusable: true; width: parent.width; visible: root.showProviders; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.closeProviders() }
-          Ui.Button { focusable: true; width: parent.width; visible: root.showTranslation; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.showTranslation = false }
-          Column {
-            width: parent.width; spacing: Style.spacing.md; visible: root.showTranslation
-            enabled: root.backendReady && !root.setupBusy
-            Text { text: "Translation"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
-            Text { width: parent.width; text: "Read the text in one language and hear it in another. Off by default. Translation needs a translator: a local LLM server (llama.cpp, LM Studio, Ollama) or the offline NLLB-200 model. User Manual → Translation explains the setup."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; id: translateToPicker; width: parent.width; label: "Speak in"; enabled: !root.enabledReader; options: root.translateOptions; value: root.config.translate_to || ""; onChanged: { root.set("translate_to", value); translateToPicker.value = Qt.binding(function() { return root.config.translate_to || "" }) } }
-            Ui.Dropdown { id: translatorPicker; width: parent.width; label: "Translator"; enabled: !root.enabledReader; options: [{value: "llm", label: "LLM server · llama.cpp, LM Studio, Ollama"}, {value: "nllb", label: "Offline NLLB-200 · 1.4 GB · non-commercial license"}]; value: root.config.translator || "llm"; onChanged: { root.set("translator", value); translatorPicker.value = Qt.binding(function() { return root.config.translator || "llm" }) } }
-            Column {
-              width: parent.width; spacing: Style.spacing.md; visible: (root.config.translator || "llm") === "llm"
-              Ui.Dropdown { id: presetPicker; width: parent.width; label: "Server"; enabled: !root.enabledReader; options: Object.keys(root.state.translator_endpoints || {}).map(function(k) { return {value: k, label: k + " · " + root.state.translator_endpoints[k]} }).concat([{value: "Custom", label: "Custom · any OpenAI-compatible server"}]); value: root.translatorPreset; onChanged: { if (value !== "Custom") root.set("translator_endpoint", root.state.translator_endpoints[value]); presetPicker.value = Qt.binding(function() { return root.translatorPreset }) } }
-              Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.config.translator_endpoint || ""; enabled: !root.enabledReader; placeholderText: "http://127.0.0.1:8080/v1 or https://server/v1"; onEditingFinished: if (text !== root.config.translator_endpoint) root.set("translator_endpoint", text) }
-              Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.config.translator_model || ""; enabled: !root.enabledReader; placeholderText: "Model name, e.g. as shown by Refresh models"; onEditingFinished: if (text !== root.config.translator_model) root.set("translator_model", text) }
-              Ui.SearchableDropdown { placeholderText: "Type to filter models…"; id: translatorModelPicker; width: parent.width; visible: (root.state.translator_models || []).length > 0; label: "Models on the server"; enabled: !root.enabledReader; options: (root.state.translator_models || []).map(function(m) { return {value: m, label: m} }); value: root.config.translator_model || ""; onChanged: { root.set("translator_model", value); translatorModelPicker.value = Qt.binding(function() { return root.config.translator_model || "" }) } }
+              Ui.Dropdown { width: parent.width; visible: root.selectedEngine !== "Online"; label: "Voice / speaker to test"; options: root.candidateVoices; value: root.candidateVoice || (root.candidateVoices.length ? root.candidateVoices[0].value : ""); onChanged: root.candidateVoice = value }
+              Text { width: parent.width; text: root.candidateReady() ? "Voice is available. Test it through the selected audio output before activating." : "Setup needed. Install a voice or supply the required settings above."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
               Flow {
                 width: parent.width; spacing: Style.spacing.md
-                Ui.Button { focusable: true; text: root.state.translator_models_loading ? "Refreshing…" : "Refresh models"; bordered: true; enabled: !root.state.translator_models_loading; onClicked: root.request({command: "translator-models"}) }
+                Ui.Button { focusable: true; text: "Test provider voice"; bordered: true; enabled: root.candidateReady() && !root.state.installing_kokoro && !root.state.kokoro_checking; onClicked: root.testCandidate() }
+                Ui.Button { focusable: true; text: "Use provider"; bordered: true; enabled: root.candidateReady() && root.candidateVerified() && !root.state.installing_kokoro && !root.state.kokoro_checking; onClicked: root.useCandidate() }
               }
-              Ui.TextField { pasteHandler: root.pasteInto; id: translatorToken; width: parent.width; password: true; enabled: !root.enabledReader; placeholderText: root.state.translator_key_ready ? "Token in use · enter to replace" : "Token, only for servers that need one" }
-              Ui.Toggle { width: parent.width; label: "Remember token on this device"; checked: root.rememberTranslatorToken; onClicked: root.rememberTranslatorToken = !checked }
-              Flow {
-                width: parent.width; spacing: Style.spacing.md
-                Ui.Button { focusable: true; text: "Apply token"; bordered: true; enabled: !root.enabledReader && translatorToken.text.length > 0; onClicked: { root.request({command: "configure-translator-token", token: translatorToken.text, remember_token: root.rememberTranslatorToken}); translatorToken.text = "" } }
-                Ui.Button { focusable: true; text: "Clear token"; bordered: true; enabled: !root.enabledReader && root.state.translator_key_ready === true; onClicked: root.request({command: "configure-translator-token", token: "", remember_token: false}) }
-              }
-              Text { width: parent.width; text: "Remote HTTPS servers receive the recognized text. llama.cpp, LM Studio and Ollama on this computer keep it local."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            }
-            Column {
-              width: parent.width; spacing: Style.spacing.md; visible: root.config.translator === "nllb"
-              Text { width: parent.width; text: root.state.nllb_ready ? "Offline translator installed. It runs on this computer; the first page takes a few seconds to load the model." : "Downloads NLLB-200 1.3B (about 1.4 GB, checksum-verified) and its runtime. The model license (CC-BY-NC 4.0) allows non-commercial use only."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-              Flow {
-                width: parent.width; spacing: Style.spacing.md
-                Ui.Button { focusable: true; text: root.state.nllb_ready ? "Repair offline translator" : "Install offline translator"; bordered: true; enabled: !root.enabledReader && !root.state.installing_translator; onClicked: root.request({command: "install-translator"}) }
-                Ui.Button { focusable: true; text: "Cancel"; bordered: true; visible: root.state.installing_translator === true; onClicked: root.request({command: "cancel-translator-install"}) }
-              }
-            }
-            Ui.Button { focusable: true; text: root.state.translation_testing ? "Testing…" : "Test translation"; bordered: true; enabled: root.translating && !root.enabledReader && !root.state.translation_testing && !root.state.installing_translator; onClicked: root.request({command: "test-translation"}) }
-            Text { width: parent.width; visible: !!root.state.translation_status; text: root.state.translation_status || ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-            Text { width: parent.width; visible: root.translating && !root.voiceReady; text: "No voice for " + root.languageInfo(root.config.translate_to).label.split(" · ")[0] + " yet. Use Add / manage speech providers… to install one."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-          }
-          Ui.Button { focusable: true; width: parent.width; visible: root.showTranslation; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.showTranslation = false }
-          Text { width: parent.width; text: "Reading controls save immediately; provider setup applies with Use provider. Closing this popup leaves narration running. Focus the window you want to read."; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.65; font.family: Style.font.family; font.pixelSize: Style.font.caption }
-        }
-        Column {
-          width: parent.width
-          spacing: Style.space(10)
-          visible: root.showManualView
-          Ui.Button { focusable: true; width: parent.width; text: "← Back to Reading Controls · ⌫"; bordered: true;  onClicked: root.showManualView = false }
-          Repeater {
-            model: [
-              {title: "1. Reading Controls", body: "• ▶ Start, ❚❚ Pause and ■ Stop sit right under the summary. Right-click the bar icon to start or stop without opening the popup; the icon is green while reading.\n• First use: open Add / manage speech providers, choose Kokoro and a voice language, then Install Kokoro voice & reader. Test provider voice, then Use provider. Then Test voice or focus your text window and Start reading. Existing reader shortcuts can also be used; this plugin does not replace desktop shortcuts.\n• Pause/Resume controls playback; Read again restarts the current page.\n• Stop ends narration and reader-owned capture. Closing this popup leaves narration running.\n• On a subpage (provider setup, translation, this manual) Backspace returns to the reading controls; Esc closes the popup."},
-              {title: "2. Voice, Language & Speed", body: "• Choose the text language (51 languages) and a local voice for it. Kokoro speaks English, German, Spanish, French, Italian, Portuguese, Hindi, Japanese and Chinese; Piper covers all except Japanese.\n• Kokoro is the default local voice. Add / manage speech providers offers Kokoro and Piper installation, a Qwen file checklist, or a compatible speech server. Optional local voices appear only with their runtimes and models installed.\n• Online supports endpoint, model, voice and token configuration. Test provider voice, then Use provider. The active provider stays selected during setup.\n• Audio output chooses speakers or headphones for every provider. System default follows your desktop setting.\n• Set the speed with the slider under ▶ Start (0.60× to 2.00×; drag, click or scroll, or Tab to it and use ←/→). Reading controls save immediately."},
-              {title: "3. Reading, PDF & Kindle", body: "• Follow active window and page changes enables continuous reading.\n• Kindle cropping skips the toolbar and margins.\n• In a PDF viewer (Evince, Papers) only the page is read: no toolbar, thumbnails or page numbers.\n• Automatic page turning advances Kindle and PDF pages after narration finishes and stops at the end of the document.\n• Manual page changes stop old speech and resume when the new text settles."},
-              {title: "4. Reading Area & Highlighting", body: "• Select area closes the popup so you can choose a region.\n• Reset area returns to the full active window.\n• Highlighting follows the current speech chunk and hides when another window has focus."},
-              {title: "5. Translation (optional)", body: "• Off by default. Turn it on under Translation → Speak in: the reader recognizes the text language and speaks the chosen language.\n• Set up a voice for the spoken language first: Add / manage speech providers… then uses that language.\n• Translator A — local LLM server (best quality, needs a GPU or patience):\n  – llama.cpp: install it (sudo pacman -S llama-cpp, or a GPU build from the llama.cpp releases), download an instruct GGUF model such as Gemma, Qwen or Llama, start it with  llama-server -m model.gguf --port 8080  and choose Server: llama.cpp.\n  – LM Studio: load a chat model, open Developer → Start server (port 1234), choose Server: LM Studio.\n  – Ollama: ollama pull gemma3 (or another chat model), keep ollama serve running, choose Server: Ollama.\n  – Refresh models lists the server's models; pick a chat/instruct model. Tokens are only for servers that require one.\n• Translator B — offline NLLB-200: Install offline translator downloads about 1.4 GB once. No server needed; runs on the CPU. License CC-BY-NC 4.0: non-commercial use only.\n• Test translation translates a sample sentence and shows the result without speaking.\n• Highlighting marks the original sentence while its translation is spoken. Remote HTTPS servers receive the recognized text."},
-              {title: "6. Troubleshooting & Privacy", body: "• No speech: verify narration is on, your text window has focus and the voice is installed.\n• Unwanted text: choose a smaller area or enable Kindle cropping.\n• OCR always runs locally. Local speech stays on this device; Online sends the recognized text to your selected provider."}
-            ]
-            delegate: Rectangle {
-              required property var modelData
-              width: parent.width
-              implicitHeight: section.implicitHeight + Style.space(16)
-              radius: Style.space(6)
-              color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.05)
-              border.width: 1
-              border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.15)
+              Text { width: parent.width; text: "Status: " + (root.message === "Off" ? "not reading" : root.message); textFormat: Text.PlainText; wrapMode: Text.Wrap; color: root.actionError ? Theme.Color.accent : Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Text { width: parent.width; visible: root.candidateVerified(); text: "Voice test passed. Choose Use provider to activate."; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Ui.Button { focusable: true; width: parent.width; text: root.showAdvanced ? "▾ Advanced · files & maintenance" : "▸ Advanced · files & maintenance"; bordered: true; onClicked: root.showAdvanced = !root.showAdvanced }
               Column {
-                id: section
-                anchors.fill: parent
-                anchors.margins: Style.space(8)
-                spacing: Style.space(4)
-                Text { width: parent.width; text: modelData.title; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
-                Text { width: parent.width; text: modelData.body; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.85; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                width: parent.width; spacing: Style.spacing.md; visible: root.showAdvanced
+                Column {
+                  width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Kokoro"
+                  Ui.Button { focusable: true; width: parent.width; text: root.state.kokoro_checking ? "Checking model updates…" : "Check for model updates"; enabled: root.backendReady && !root.state.kokoro_checking && !root.state.installing_kokoro; onClicked: root.request({command: "check-kokoro-updates", language: root.installLanguage}) }
+                  Text { width: parent.width; text: ((root.state.kokoro_updates || {})[root.installLanguage] || {}).message || ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                  Ui.Button { focusable: true; width: parent.width; text: root.state.installing_kokoro ? "Updating model…" : "Update selected Kokoro model"; visible: ((root.state.kokoro_updates || {})[root.installLanguage] || {}).available === true; enabled: !root.state.installing_kokoro && !root.state.kokoro_checking; bordered: true; onClicked: root.request({command: "update-kokoro", language: root.installLanguage}) }
+                  Ui.Button { focusable: true; text: "Cancel model update"; visible: root.state.installing_kokoro === true; onClicked: root.request({command: "cancel-kokoro-install"}) }
+                }
+                Repeater {
+                  model: root.selectedEngine === "Piper" ? [{key: "piper_runner", label: "Piper executable"}, {key: "piper_model", label: "Voice model (.onnx)"}, {key: "piper_config", label: "Voice configuration (.json)"}] : root.selectedEngine === "Qwen" ? [{key: "qwen_runner", label: "llama.cpp TTS executable"}, {key: "qwen_model", label: "Qwen backbone (.gguf)"}, {key: "qwen_projection", label: "Audio projection (.gguf)"}, {key: "qwen_speaker", label: "Speaker recording (.wav)"}] : []
+                  delegate: Column {
+                    required property var modelData
+                    width: parent.width; spacing: Style.space(4)
+                    Ui.PanelSectionHeader { text: modelData.label }
+                    Row {
+                      width: parent.width; spacing: Style.spacing.md
+                      Ui.TextField { pasteHandler: root.pasteInto; width: parent.width - browseButton.width - parent.spacing; text: root.candidatePath(modelData.key); placeholderText: "Absolute file path or ~/"; onEditingFinished: root.setCandidatePath(modelData.key, text) }
+                      Ui.Button { focusable: true; id: browseButton; text: "Browse…"; onClicked: root.chooseFile(modelData.key) }
+                    }
+                  }
+                }
+                Column {
+                  width: parent.width; spacing: Style.spacing.md; visible: root.selectedEngine === "Online"
+                  Text { width: parent.width; text: "The server must support /v1/audio/speech with WAV output. Model discovery is available for the active connection; it may include chat models which cannot speak."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                  Ui.Button { focusable: true; text: "Refresh active server models"; enabled: root.backendReady && !root.state.models_loading; onClicked: root.request({command: "online-models"}) }
+                  Ui.SearchableDropdown { placeholderText: "Type to filter models…"; width: parent.width; label: "Discovered models"; options: root.state.online_models || []; value: root.onlineModel; onChanged: root.onlineModel = value }
+                  Ui.Button { focusable: true; text: "Clear active server token"; enabled: root.backendReady; onClicked: root.request({command: "configure-token", token: "", remember_token: false}) }
+                }
               }
             }
+            Ui.Button { focusable: true; width: parent.width; visible: root.showProviders; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.closeProviders() }
+            Ui.Button { focusable: true; width: parent.width; visible: root.showTranslation; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.showTranslation = false }
+            Column {
+              width: parent.width; spacing: Style.spacing.md; visible: root.showTranslation
+              enabled: root.backendReady && !root.setupBusy
+              Text { text: "Translation"; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.body; font.bold: true }
+              Text { width: parent.width; text: "Read the text in one language and hear it in another. Off by default. Translation needs a translator: a local LLM server (llama.cpp, LM Studio, Ollama) or the offline NLLB-200 model. User Manual → Translation explains the setup."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Ui.SearchableDropdown { placeholderText: "Type to filter languages…"; id: translateToPicker; width: parent.width; label: "Speak in"; enabled: !root.enabledReader; options: root.translateOptions; value: root.config.translate_to || ""; onChanged: { root.set("translate_to", value); translateToPicker.value = Qt.binding(function() { return root.config.translate_to || "" }) } }
+              Ui.Dropdown { id: translatorPicker; width: parent.width; label: "Translator"; enabled: !root.enabledReader; options: [{value: "llm", label: "LLM server · llama.cpp, LM Studio, Ollama"}, {value: "nllb", label: "Offline NLLB-200 · 1.4 GB · non-commercial license"}]; value: root.config.translator || "llm"; onChanged: { root.set("translator", value); translatorPicker.value = Qt.binding(function() { return root.config.translator || "llm" }) } }
+              Column {
+                width: parent.width; spacing: Style.spacing.md; visible: (root.config.translator || "llm") === "llm"
+                Ui.Dropdown { id: presetPicker; width: parent.width; label: "Server"; enabled: !root.enabledReader; options: Object.keys(root.state.translator_endpoints || {}).map(function(k) { return {value: k, label: k + " · " + root.state.translator_endpoints[k]} }).concat([{value: "Custom", label: "Custom · any OpenAI-compatible server"}]); value: root.translatorPreset; onChanged: { if (value !== "Custom") root.set("translator_endpoint", root.state.translator_endpoints[value]); presetPicker.value = Qt.binding(function() { return root.translatorPreset }) } }
+                Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.config.translator_endpoint || ""; enabled: !root.enabledReader; placeholderText: "http://127.0.0.1:8080/v1 or https://server/v1"; onEditingFinished: if (text !== root.config.translator_endpoint) root.set("translator_endpoint", text) }
+                Ui.TextField { pasteHandler: root.pasteInto; width: parent.width; text: root.config.translator_model || ""; enabled: !root.enabledReader; placeholderText: "Model name, e.g. as shown by Refresh models"; onEditingFinished: if (text !== root.config.translator_model) root.set("translator_model", text) }
+                Ui.SearchableDropdown { placeholderText: "Type to filter models…"; id: translatorModelPicker; width: parent.width; visible: (root.state.translator_models || []).length > 0; label: "Models on the server"; enabled: !root.enabledReader; options: (root.state.translator_models || []).map(function(m) { return {value: m, label: m} }); value: root.config.translator_model || ""; onChanged: { root.set("translator_model", value); translatorModelPicker.value = Qt.binding(function() { return root.config.translator_model || "" }) } }
+                Flow {
+                  width: parent.width; spacing: Style.spacing.md
+                  Ui.Button { focusable: true; text: root.state.translator_models_loading ? "Refreshing…" : "Refresh models"; bordered: true; enabled: !root.state.translator_models_loading; onClicked: root.request({command: "translator-models"}) }
+                }
+                Ui.TextField { pasteHandler: root.pasteInto; id: translatorToken; width: parent.width; password: true; enabled: !root.enabledReader; placeholderText: root.state.translator_key_ready ? "Token in use · enter to replace" : "Token, only for servers that need one" }
+                Ui.Toggle { width: parent.width; label: "Remember token on this device"; checked: root.rememberTranslatorToken; onClicked: root.rememberTranslatorToken = !checked }
+                Flow {
+                  width: parent.width; spacing: Style.spacing.md
+                  Ui.Button { focusable: true; text: "Apply token"; bordered: true; enabled: !root.enabledReader && translatorToken.text.length > 0; onClicked: { root.request({command: "configure-translator-token", token: translatorToken.text, remember_token: root.rememberTranslatorToken}); translatorToken.text = "" } }
+                  Ui.Button { focusable: true; text: "Clear token"; bordered: true; enabled: !root.enabledReader && root.state.translator_key_ready === true; onClicked: root.request({command: "configure-translator-token", token: "", remember_token: false}) }
+                }
+                Text { width: parent.width; text: "Remote HTTPS servers receive the recognized text. llama.cpp, LM Studio and Ollama on this computer keep it local."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              }
+              Column {
+                width: parent.width; spacing: Style.spacing.md; visible: root.config.translator === "nllb"
+                Text { width: parent.width; text: root.state.nllb_ready ? "Offline translator installed. It runs on this computer; the first page takes a few seconds to load the model." : "Downloads NLLB-200 1.3B (about 1.4 GB, checksum-verified) and its runtime. The model license (CC-BY-NC 4.0) allows non-commercial use only."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                Flow {
+                  width: parent.width; spacing: Style.spacing.md
+                  Ui.Button { focusable: true; text: root.state.nllb_ready ? "Repair offline translator" : "Install offline translator"; bordered: true; enabled: !root.enabledReader && !root.state.installing_translator; onClicked: root.request({command: "install-translator"}) }
+                  Ui.Button { focusable: true; text: "Cancel"; bordered: true; visible: root.state.installing_translator === true; onClicked: root.request({command: "cancel-translator-install"}) }
+                }
+              }
+              Ui.Button { focusable: true; text: root.state.translation_testing ? "Testing…" : "Test translation"; bordered: true; enabled: root.translating && !root.enabledReader && !root.state.translation_testing && !root.state.installing_translator; onClicked: root.request({command: "test-translation"}) }
+              Text { width: parent.width; visible: !!root.state.translation_status; text: root.state.translation_status || ""; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Text { width: parent.width; visible: root.translating && !root.voiceReady; text: "No voice for " + root.languageInfo(root.config.translate_to).label.split(" · ")[0] + " yet. Use Add / manage speech providers… to install one."; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+            }
+            Ui.Button { focusable: true; width: parent.width; visible: root.showTranslation; text: "← Back to Reading Controls · ⌫"; bordered: true; onClicked: root.showTranslation = false }
+            Text { width: parent.width; text: "Reading controls save immediately; provider setup applies with Use provider. Closing this popup leaves narration running. Focus the window you want to read."; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.65; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           }
-          Ui.Button { focusable: true; width: parent.width; text: "← Back to Reading Controls · ⌫"; bordered: true;  onClicked: root.showManualView = false }
+          Column {
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.showManualView
+            Ui.Button { focusable: true; width: parent.width; text: "← Back to Reading Controls · ⌫"; bordered: true;  onClicked: root.showManualView = false }
+            Repeater {
+              model: [
+                {title: "1. Reading Controls", body: "• ▶ Start, ❚❚ Pause and ■ Stop sit right under the summary. Right-click the bar icon to start or stop without opening the popup; the icon is green while reading.\n• First use: open Add / manage speech providers, choose Kokoro and a voice language, then Install Kokoro voice & reader. Test provider voice, then Use provider. Then Test voice or focus your text window and Start reading. Existing reader shortcuts can also be used; this plugin does not replace desktop shortcuts.\n• Pause/Resume controls playback; Read again restarts the current page.\n• Stop ends narration and reader-owned capture. Closing this popup leaves narration running.\n• On a subpage (provider setup, translation, this manual) Backspace returns to the reading controls; Esc closes the popup."},
+                {title: "2. Voice, Language & Speed", body: "• Choose the text language (51 languages) and a local voice for it. Kokoro speaks English, German, Spanish, French, Italian, Portuguese, Hindi, Japanese and Chinese; Piper covers all except Japanese.\n• Kokoro is the default local voice. Add / manage speech providers offers Kokoro and Piper installation, a Qwen file checklist, or a compatible speech server. Optional local voices appear only with their runtimes and models installed.\n• Online supports endpoint, model, voice and token configuration. Test provider voice, then Use provider. The active provider stays selected during setup.\n• Audio output chooses speakers or headphones for every provider. System default follows your desktop setting.\n• Set the speed with the slider under ▶ Start (0.60× to 2.00×; drag, click or scroll, or Tab to it and use ←/→). Reading controls save immediately."},
+                {title: "3. Reading, PDF & Kindle", body: "• Follow active window and page changes enables continuous reading.\n• Kindle cropping skips the toolbar and margins.\n• In a PDF viewer (Evince, Papers) only the page is read: no toolbar, thumbnails or page numbers.\n• Automatic page turning advances Kindle and PDF pages after narration finishes and stops at the end of the document.\n• Manual page changes stop old speech and resume when the new text settles."},
+                {title: "4. Reading Area & Highlighting", body: "• Select area closes the popup so you can choose a region.\n• Reset area returns to the full active window.\n• Highlighting follows the current speech chunk and hides when another window has focus."},
+                {title: "5. Translation (optional)", body: "• Off by default. Turn it on under Translation → Speak in: the reader recognizes the text language and speaks the chosen language.\n• Set up a voice for the spoken language first: Add / manage speech providers… then uses that language.\n• Translator A — local LLM server (best quality, needs a GPU or patience):\n  – llama.cpp: install it (sudo pacman -S llama-cpp, or a GPU build from the llama.cpp releases), download an instruct GGUF model such as Gemma, Qwen or Llama, start it with  llama-server -m model.gguf --port 8080  and choose Server: llama.cpp.\n  – LM Studio: load a chat model, open Developer → Start server (port 1234), choose Server: LM Studio.\n  – Ollama: ollama pull gemma3 (or another chat model), keep ollama serve running, choose Server: Ollama.\n  – Refresh models lists the server's models; pick a chat/instruct model. Tokens are only for servers that require one.\n• Translator B — offline NLLB-200: Install offline translator downloads about 1.4 GB once. No server needed; runs on the CPU. License CC-BY-NC 4.0: non-commercial use only.\n• Test translation translates a sample sentence and shows the result without speaking.\n• Highlighting marks the original sentence while its translation is spoken. Remote HTTPS servers receive the recognized text."},
+                {title: "6. Troubleshooting & Privacy", body: "• No speech: verify narration is on, your text window has focus and the voice is installed.\n• Unwanted text: choose a smaller area or enable Kindle cropping.\n• OCR always runs locally. Local speech stays on this device; Online sends the recognized text to your selected provider.\n• F12 (no Ctrl, Shift, Alt or Super) saves a picture of this popup only to ~/Pictures/Screen Narrator and asks what is wrong; the note goes next to it. Nothing is sent anywhere. Panel → F12 saves a screenshot turns it off."}
+              ]
+              delegate: Rectangle {
+                required property var modelData
+                width: parent.width
+                implicitHeight: section.implicitHeight + Style.space(16)
+                radius: root.corners.radius
+                color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.05)
+                border.width: 1
+                border.color: Qt.rgba(Commons.Color.foreground.r, Commons.Color.foreground.g, Commons.Color.foreground.b, 0.15)
+                Column {
+                  id: section
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(4)
+                  Text { width: parent.width; text: modelData.title; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Theme.Color.accent; font.family: Style.font.family; font.pixelSize: Theme.Style.font.bodySmall; font.bold: true }
+                  Text { width: parent.width; text: modelData.body; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: Commons.Color.foreground; opacity: 0.85; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+                }
+              }
+            }
+            Ui.Button { focusable: true; width: parent.width; text: "← Back to Reading Controls · ⌫"; bordered: true;  onClicked: root.showManualView = false }
+          }
         }
       }
     }
