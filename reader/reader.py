@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (QApplication, QSystemTrayIcon, QMenu, QDialog,
 HOME = Path.home()
 DATA = HOME / '.local/share/kindle-reader'
 CONFIG = HOME / '.config/kindle-reader/settings.json'
+MANUAL_TURN = 'Waiting for you to turn the page'
 RUNTIME = Path(os.environ.get('XDG_RUNTIME_DIR', f'/run/user/{os.getuid()}')) / 'kindle-reader'
 QWEN_MODEL_DIR = Path(os.environ.get('QWEN_TTS_MODEL_DIR', DATA / 'models/Qwen3-TTS-1.7B'))
 VOICES = {
@@ -1010,7 +1011,7 @@ class Reader(QObject):
     def scan(self):
         if getattr(self, 'testing_voice', False) or not self.enabled or self.paused or self.scanning or self.menu.isVisible() or (self.dialog and self.dialog.isVisible()):
             return
-        if not self.settings['follow'] and self.last_text and self.status not in ('Waiting for the reading window', 'Turning to next page…'):
+        if not self.settings['follow'] and self.last_text and self.status not in ('Waiting for the reading window', 'Turning to next page…', MANUAL_TURN):
             if self.target:
                 # No new pages, but closing the book still ends reading.
                 self.scanning = True
@@ -1252,10 +1253,15 @@ class Reader(QObject):
                         self.do_page_turn()
                         return
                     if time.monotonic() - page_turned >= 3:
+                        # Kindle often ignores a key sent to it (no reliable end either):
+                        # stay on and read on as soon as the page is turned by hand.
                         self.page_turned_at = None
                         self.turn_retries = 0
-                        self.set_enabled(False)
-                        self.update('End of document')
+                        print('Reader page turn not taken: waiting for a manual page turn',
+                              file=sys.stderr, flush=True)
+                        self.update(MANUAL_TURN)
+                        desktop_notify('Screen Narrator', 'Could not turn the page: turn it yourself and reading goes on',
+                                       timeout=4000)
                         return
             if self.status == 'Waiting for the reading window' and not self.is_speaking():
                 self.on_page_finished()

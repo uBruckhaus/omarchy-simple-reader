@@ -360,7 +360,7 @@ class PinnedWindowTests(unittest.TestCase):
         self.assertEqual(task.call_count, 1)
         subject.update.assert_called_once_with('Waiting for the reading window')
 
-    def test_missed_kindle_page_turn_retries_then_stops_at_end(self):
+    def test_missed_kindle_page_turn_retries_then_waits_for_manual_turn(self):
         import hashlib, time
         from reader import Reader
         digest = hashlib.sha256(b'same page').digest()
@@ -377,9 +377,22 @@ class PinnedWindowTests(unittest.TestCase):
             self.assertEqual(subject.turn_retries, 2)
             self.assertEqual(subject.do_page_turn.call_count, 2)
             subject.page_turned_at = time.monotonic() - 3.5
-            Reader.prepared(subject, 0, '', '')
-            subject.set_enabled.assert_called_once_with(False)
-            subject.update.assert_called_once_with('End of document')
+            with patch('reader.desktop_notify') as notify:
+                Reader.prepared(subject, 0, '', '')
+            notify.assert_called_once()
+            subject.set_enabled.assert_not_called()
+            subject.update.assert_called_once_with('Waiting for you to turn the page')
+            self.assertIsNone(subject.page_turned_at)
+
+    def test_waiting_for_manual_turn_keeps_scanning_with_follow_off(self):
+        from reader import Reader
+        subject = SimpleNamespace(enabled=True, paused=False, scanning=False, menu=Mock(), dialog=None,
+            settings={'follow': False}, last_text='Read page', got_pinned=Mock(), target='0x123',
+            status='Waiting for you to turn the page')
+        subject.menu.isVisible.return_value = False
+        with patch('reader.Task') as task:
+            Reader.scan(subject)
+        self.assertIs(task.call_args.args[2], subject.got_pinned)
 
     def test_turning_scans_new_page_even_with_follow_off(self):
         from reader import Reader
