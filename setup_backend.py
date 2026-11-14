@@ -88,11 +88,22 @@ def report(message, stage=None, busy=True):
     print(message, flush=True)
 
 
-def scope_gone(scope):
-    """Stops a helper's scope (TERM to every process in it, KILL after 10 s) and returns
-    True only once systemd reports it inactive. A cgroup cannot be left with setsid or a
-    double fork, so nothing the helper started survives a confirmed stop."""
-    for _ in range(3):
+def scope_gone(scope, launcher):
+    """Ends a helper: its scope is stopped (TERM to every process in it, KILL after 10 s),
+    the launcher (systemd-run, then the helper itself; still our unreaped child) is killed
+    and reaped, so a scope registered late can no longer start anything, and only then is
+    systemd asked. Retries until systemd reports the scope inactive or failed, so setup
+    keeps its ownership (busy state, lock) for as long as that takes."""
+    pause = 1
+    while True:
+        try:
+            subprocess.run(['systemctl', '--user', 'stop', '--', scope], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if launcher.poll() is None:
+            launcher.kill()
+        launcher.wait()
         try:
             subprocess.run(['systemctl', '--user', 'stop', '--', scope], stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
@@ -101,9 +112,13 @@ def scope_gone(scope):
         except (OSError, subprocess.SubprocessError):
             state = ''
         if state in ('inactive', 'failed'):
-            return True
-        time.sleep(1)
-    return False
+            return
+        try:
+            report('Waiting for setup helper ' + scope + ' to stop…')
+        except Exception:
+            pass
+        time.sleep(pause)
+        pause = min(pause * 2, 30)
 
 
 def run(args, stream=False, contained=True):
@@ -121,14 +136,15 @@ def run(args, stream=False, contained=True):
         current = (proc, scope)
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous)
-    tail, pending, code, stopped = [], b'', None, scope is None
+    tail, pending, code = [], b'', None
     try:
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
             while True:
-                if not selector.select(1.0):
-                    if proc.poll() is not None:
-                        break  # exited; whatever still holds the pipe is ended with the scope
+                ready = selector.select(1.0)
+                if proc.poll() is not None:
+                    break  # exited; whatever still holds or fills the pipe is ended with the scope
+                if not ready:
                     continue
                 chunk = os.read(proc.stdout.fileno(), 65536)
                 if not chunk:
@@ -145,14 +161,12 @@ def run(args, stream=False, contained=True):
         code = proc.wait()
     finally:
         if scope is not None:
-            stopped = scope_gone(scope)
+            scope_gone(scope, proc)
         elif proc.poll() is None:
             proc.wait()  # the root transaction; it cannot be stopped by this user
         proc.stdout.close()
         proc.wait()
         current = None
-    if not stopped:
-        raise RuntimeError('Could not confirm that the setup helper stopped; check `systemctl --user status ' + scope + '`.')
     if code:
         raise RuntimeError('\n'.join(tail)[-1200:] or 'Command failed: ' + str(args[0]))
 
@@ -164,20 +178,17 @@ def interrupted(*_):
         report('Cancelling setup…', 'cancelling')
     except Exception:
         pass  # a failed status write (full disk) must not skip the cleanup
-    confirmed = True
     try:
         if current is not None:
             proc, scope = current
             if scope is not None:
-                confirmed = scope_gone(scope)
+                scope_gone(scope, proc)  # returns only once systemd confirms it
             else:
                 proc.wait()  # a root package transaction finishes on its own
     finally:
         # Setup ownership (busy state, lock) ends only once no helper is left.
         try:
-            report('Setup cancelled. Installed files are kept; you can retry.' if confirmed else
-                   'Setup cancelled, but a helper could not be confirmed stopped; check systemctl --user.',
-                   'cancelled' if confirmed else 'error', False)
+            report('Setup cancelled. Installed files are kept; you can retry.', 'cancelled', False)
         except Exception:
             pass
         os._exit(130)

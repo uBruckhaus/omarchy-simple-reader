@@ -2,7 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import setup_backend as setup
 import bridge
 
@@ -336,12 +336,12 @@ class ClipboardTests(unittest.TestCase):
 
     def test_cancel_cleans_up_even_when_the_status_cannot_be_written(self):
         with patch.object(setup, 'report', side_effect=OSError('disk full')), \
-             patch.object(setup, 'current', (None, 'screen-narrator-setup-0123456789abcdef.scope')), \
-             patch.object(setup, 'scope_gone', return_value=True) as gone, \
+             patch.object(setup, 'current', ('launcher', 'screen-narrator-setup-0123456789abcdef.scope')), \
+             patch.object(setup, 'scope_gone', return_value=None) as gone, \
              patch('setup_backend.os._exit', side_effect=SystemExit(130)), patch('setup_backend.signal.signal'):
             with self.assertRaises(SystemExit):
                 setup.interrupted()
-        gone.assert_called_once_with('screen-narrator-setup-0123456789abcdef.scope')
+        gone.assert_called_once_with('screen-narrator-setup-0123456789abcdef.scope', 'launcher')
 
     def test_tree_wrapper_reaps_leftovers_and_relays_the_exit_code(self):
         # The wrapped helper exits at once but leaves a grandchild that left its group
@@ -377,6 +377,27 @@ class ClipboardTests(unittest.TestCase):
             setup.run([sys.executable, '-c', helper])
             self.assertLess(time.monotonic() - start, 30)
             self.assertFalse(Path('/proc/' + pid_file.read_text()).exists())
+
+    def test_scope_stop_kills_the_launcher_first_and_waits_for_systemd(self):
+        launcher = Mock(); launcher.poll.return_value = None
+        states = iter(['', 'active', 'inactive'])
+        def run(argv, **kwargs):
+            return type('R', (), {'stdout': next(states) if 'is-active' in argv else ''})()
+        with patch('setup_backend.subprocess.run', side_effect=run), patch('setup_backend.time.sleep'), \
+             patch.object(setup, 'report'):
+            setup.scope_gone('screen-narrator-setup-x.scope', launcher)   # returns only on "inactive"
+        launcher.kill.assert_called()
+        launcher.wait.assert_called()
+
+    def test_a_helper_flooding_its_output_does_not_keep_setup_busy(self):
+        import sys, time, textwrap
+        helper = textwrap.dedent("""
+            import subprocess, sys
+            subprocess.Popen([sys.executable, '-c', 'import sys\\nwhile True: sys.stdout.write("x" * 4096 + "\\\\n")'], start_new_session=True)
+        """)
+        start = time.monotonic()
+        setup.run([sys.executable, '-c', helper])
+        self.assertLess(time.monotonic() - start, 30)
 
     def test_only_the_root_package_transaction_runs_outside_a_scope(self):
         import re
