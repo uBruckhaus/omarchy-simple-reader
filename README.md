@@ -42,7 +42,9 @@ are built in: Cancel stops the running step's processes (including ones that lef
 waits five seconds, ends what is left with SIGKILL and reaps all of them before setup reports
 **cancelled** and can be started again. The Kokoro voice, Kokoro model update and offline translator
 installers in the popup run under the same supervisor (`reader/proc_tree.py`); their Cancel shows
-**Cancelling…** until every process they started is gone. System package transactions request authorization and cannot be
+**Cancelling…** until every process they started is gone. The reader service runs with
+`KillMode=control-group` and `TimeoutStopSec=30`, so stopping it ends every process it started,
+whatever they did to their process group. System package transactions request authorization and cannot be
 cancelled from the popup. Setup does not start narration or add shortcuts.
 
 Existing managed reader installations are upgraded with a backup of runtime and service files
@@ -75,10 +77,12 @@ Nothing is installed when the plugin is added. Setup runs only when you press **
   wheel) and `unidic-lite` (data only), which are built from their hashed source packages against the
   locked `setuptools`, `wheel` and `Cython` without fetching other build tools (this needs a C++
   compiler). The locks are made for CPython 3.14 on Linux x86_64 by `update-locks.sh`. Each runtime
-  records the SHA256 of the lock it was installed from (`.verified-<lock>`); a runtime without a current
-  record (for example from an older release) is not trusted because its modules import: setup reinstalls
-  every locked package from the lock (`--force-reinstall`) and removes every package no verified lock
-  lists, so only checked files remain. `pip` itself comes from the system Python's own venv module.
+  records the SHA256 of the lock it was installed from (`.verified-<lock>`). A runtime without a current
+  record (for example from an older release) is never upgraded in place or trusted because its modules
+  import: setup moves it aside, makes a new one with the system Python's `venv` module (interpreter and
+  `pip` from the Arch `python` package), installs the lock into it and then deletes the old one (or puts
+  it back if the install fails). Optional parts (Japanese dictionary, offline translator) are installed
+  again from their locks when next needed.
   Replaced files are backed up in `~/.local/share/kindle-reader/backups/`.
 - **Downloads**, all from pinned revisions and checked with SHA256 before use: Kokoro models (GitHub
   release `model-files-v1.0`, Hugging Face `Godelaune/Kokoro-82M-ONNX-German-Martin`), Piper voices

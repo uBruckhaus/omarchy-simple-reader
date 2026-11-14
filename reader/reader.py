@@ -2163,9 +2163,10 @@ class Reader(QObject):
     def shutdown(self):
         self.set_enabled(False)
         # Installers end their whole process tree before the reader exits.
+        # No own timeout: systemd's TimeoutStopSec (30 s) then ends the whole cgroup.
         for task in [task for task in list(self.tasks) if task.tree]:
             task.stop()
-            task.proc.waitForFinished(20000)
+            task.proc.waitForFinished(-1)
         self.server.close()
         self.tray.hide()
 

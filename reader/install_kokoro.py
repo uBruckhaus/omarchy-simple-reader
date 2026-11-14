@@ -103,8 +103,8 @@ def install(language, progress=None, check_only=False):
     def pip(argv, timeout):
         subprocess.run(argv, check=True, timeout=timeout, stdout=sys.stderr)
     if not dependencies:
-        report('Installing Kokoro runtime dependencies…')
-        lock_install.install(sys.executable, sys.prefix, 'base', lambda argv: pip(argv, 900))
+        # The reader's own runtime is only ever rebuilt by setup, never changed in place.
+        raise RuntimeError('The reader runtime needs repair: choose Set up reader runtime first.')
     if japanese and not japanese_ready:
         report('Installing Japanese pronunciation dictionary (about 270 MB)…')
         # mojimoji (no CPython 3.14 wheel) and unidic-lite (data only) are built from their

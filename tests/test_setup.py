@@ -241,35 +241,6 @@ class ClipboardTests(unittest.TestCase):
             lock_install.marker(prefix, 'base').write_text('0' * 64 + '\n')
             self.assertFalse(lock_install.verified(prefix, 'base'))
 
-    def test_prune_removes_everything_no_verified_lock_lists(self):
-        import lock_install
-        with tempfile.TemporaryDirectory() as folder:
-            prefix = Path(folder)
-            lock_install.marker(prefix, 'base').write_text(lock_install.digest('base') + '\n')
-            lock_install.marker(prefix, 'nllb').write_text('stale\n')
-            listing = json.dumps([{'name': 'pip'}, {'name': 'PySide6'}, {'name': 'numpy'},
-                                  {'name': 'piper-tts'}, {'name': 'ctranslate2'}])
-            calls = []
-            with patch('lock_install.subprocess.run', return_value=type('R', (), {'stdout': listing})()):
-                lock_install.prune('py', prefix, calls.append, ('base', 'nllb'))
-            self.assertEqual(calls, [['py', '-m', 'pip', 'uninstall', '--disable-pip-version-check', '-y', 'ctranslate2', 'piper-tts']])
-            self.assertFalse(lock_install.marker(prefix, 'nllb').exists())
-
-    def test_runtime_counts_as_verified_only_after_install_and_prune(self):
-        import lock_install
-        with tempfile.TemporaryDirectory() as folder:
-            prefix = Path(folder)
-            def broken_prune(*a, **k):
-                raise RuntimeError('cancelled during prune')
-            with patch.object(lock_install, 'prune', side_effect=broken_prune):
-                with self.assertRaises(RuntimeError):
-                    lock_install.rebuild('py', prefix, 'base', lambda argv: None, ('base', 'nllb'))
-            self.assertFalse(lock_install.verified(prefix, 'base'))   # the retry redoes install + prune
-            with patch.object(lock_install, 'prune') as prune:
-                lock_install.rebuild('py', prefix, 'base', lambda argv: None, ('base', 'nllb'))
-            self.assertEqual(prune.call_args.kwargs['current'], 'base')
-            self.assertTrue(lock_install.verified(prefix, 'base'))
-
     def test_helper_tree_is_ended_when_streaming_fails(self):
         import subprocess, sys
         with patch.object(setup, 'report', side_effect=OSError('disk full')), \
@@ -280,6 +251,57 @@ class ClipboardTests(unittest.TestCase):
         self.assertIsNone(setup.child)
         import os
         os.killpg(stop.call_args.args[0], 9); os.waitpid(stop.call_args.args[0], 0)  # the mock did not reap it
+
+    def test_unverified_runtime_is_rebuilt_from_the_system_python_never_upgraded(self):
+        import lock_install, sys
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder); prefix = base / 'venv'; backups = base / 'backups'
+            (prefix / 'lib').mkdir(parents=True); (prefix / 'lib/old-unverified.py').write_text('old')
+            calls = []
+            def run(argv):
+                calls.append(argv)
+                if argv[1:3] == ['-m', 'venv']:
+                    Path(argv[3], 'bin').mkdir(parents=True)
+            lock_install.rebuild(prefix, 'base', run, sys.executable, backups)
+            self.assertEqual(calls[0], [str(Path(sys.executable).resolve()), '-m', 'venv', str(prefix)])
+            self.assertEqual(calls[1][:3], [str(prefix / 'bin/python'), '-m', 'pip'])   # the new runtime's pip
+            self.assertFalse((prefix / 'lib/old-unverified.py').exists())
+            self.assertEqual(list(backups.iterdir()), [])                              # old one deleted
+            self.assertTrue(lock_install.verified(prefix, 'base'))
+            # A failed rebuild puts the previous runtime back and leaves it unverified.
+            (prefix / 'keep.txt').write_text('previous')
+            lock_install.marker(prefix, 'base').unlink()
+            def fail(argv):
+                run(argv)
+                if argv[1:3] == ['-m', 'pip']:
+                    raise RuntimeError('hash mismatch')
+            with self.assertRaises(RuntimeError):
+                lock_install.rebuild(prefix, 'base', fail, sys.executable, backups)
+            self.assertEqual((prefix / 'keep.txt').read_text(), 'previous')
+            self.assertFalse(lock_install.verified(prefix, 'base'))
+
+    def test_rebuild_refuses_an_interpreter_inside_the_runtime(self):
+        import lock_install
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder) / 'venv'; (prefix / 'bin').mkdir(parents=True)
+            fake = prefix / 'bin/python'; fake.write_text('')
+            with self.assertRaises(RuntimeError):
+                lock_install.rebuild(prefix, 'base', lambda argv: None, fake, Path(folder) / 'backups')
+            self.assertTrue(fake.exists())
+
+    def test_service_drop_in_lets_installer_supervisors_finish(self):
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder); data = base / 'data'; source = base / 'source'
+            (source / 'reader').mkdir(parents=True); (source / 'reader/reader.py').write_text('x')
+            unit = base / 'ocrvox.service'
+            with patch.object(setup, 'DATA', data), patch.object(setup, 'UNIT', unit), patch.object(setup, 'ROOT', source), \
+                 patch.object(setup, 'missing_packages', return_value=[]), patch.object(setup, 'runtime_ready', return_value=True), \
+                 patch.object(setup, 'report'), patch.object(setup, 'install_launcher'), patch.object(setup, 'run'):
+                setup.install('de', backend_only=True)
+            drop_in = (base / 'ocrvox.service.d/read-aloud-runtime.conf').read_text()
+            self.assertIn('KillMode=control-group', drop_in)
+            self.assertIn('TimeoutStopSec=30', drop_in)
+            self.assertIn('TimeoutStopSec=30', unit.read_text())
 
     def test_existing_runtime_without_marker_is_not_ready(self):
         with tempfile.TemporaryDirectory() as folder:

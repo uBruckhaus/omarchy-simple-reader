@@ -25,10 +25,8 @@ def install(data, language, run, report):
     runtime = data / 'piper-runtime'
     python = runtime / 'bin/python'
     report('Preparing separate Piper runtime…', 'runtime')
-    if not python.exists():
-        run([sys.executable, '-m', 'venv', runtime])
-    if not lock_install.verified(runtime, 'piper'):
-        lock_install.rebuild(python, runtime, 'piper', lambda argv: run(argv, stream=True), ('piper',))
+    if not (python.exists() and lock_install.verified(runtime, 'piper')):
+        lock_install.rebuild(runtime, 'piper', lambda argv: run(argv, stream=True), getattr(sys, '_base_executable', sys.executable), data / 'backups')
     prefix, name, model_digest, config_digest, size = PIPER[language]
     report(f'Downloading Piper voice (about {size} MB)…', 'voice')
     download_asset(name, BASE + prefix, model_digest, folder, report)

@@ -26,8 +26,7 @@ PACKAGES = {'grim': 'grim', 'slurp': 'slurp', 'magick': 'imagemagick',
             'quickshell': 'quickshell', 'hyprctl': 'hyprland', 'pactl': 'libpulse'}
 MODULES = ('PySide6', 'kokoro_onnx', 'numpy', 'soundfile', 'onnxruntime')
 # Every pip install takes exact files from a lock with sha256 hashes (reader/lock-*.txt,
-# installed by reader/lock_install.py), and the runtime keeps nothing those locks do not list.
-RUNTIME_LOCKS = ('base', 'build', 'japanese', 'nllb')
+# installed by reader/lock_install.py into a runtime made fresh from the system Python).
 child = None
 phase = ''
 
@@ -182,12 +181,10 @@ def install(language, backend_only=False, engine=None, ocr_language=None, transl
             run(['pkexec', 'pacman', '-S', '--needed', '--noconfirm', *packages])
         report('Preparing private Python runtime…', 'runtime')
         python = DATA / 'venv/bin/python'
-        if not python.exists():
-            run([sys.executable, '-m', 'venv', DATA / 'venv'])
         if not runtime_ready():
-            # The reader runs from this runtime: stop it before files are replaced.
+            # The reader runs from this runtime: stop it before the runtime is replaced.
             run(['systemctl', '--user', 'stop', 'ocrvox.service']) if existing else None
-            lock_install.rebuild(python, DATA / 'venv', 'base', lambda argv: run(argv, stream=True), RUNTIME_LOCKS)
+            lock_install.rebuild(DATA / 'venv', 'base', lambda argv: run(argv, stream=True), getattr(sys, '_base_executable', sys.executable), DATA / 'backups')
         backup = DATA / 'backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         backup.mkdir(parents=True)
         report('Updating reader runtime (existing files backed up)…', 'runtime')
@@ -220,7 +217,7 @@ ExecStart=%h/.local/share/kindle-reader/venv/bin/python %h/.local/share/kindle-r
 Restart=on-failure
 RestartSec=3
 KillMode=control-group
-TimeoutStopSec=5
+TimeoutStopSec=30
 UMask=0077
 ''')
         # A managed override updates legacy launchers without replacing their unit.
@@ -235,6 +232,10 @@ UMask=0077
                     if line.startswith('Environment=QWEN_TTS_MODEL_DIR=')][-1:]
         override_text = '''# Managed by ubruckhaus.simple-reader
 [Service]
+# Stopping the reader ends its whole cgroup, installers included; 30 s leaves the
+# installer supervisors their 5 s TERM grace and the reaping after it.
+KillMode=control-group
+TimeoutStopSec=30
 ExecStart=
 ExecStart=%h/.local/share/kindle-reader/venv/bin/python %h/.local/share/kindle-reader/app/reader.py
 Environment=OCRVOX_BAR_WIDGET=1
