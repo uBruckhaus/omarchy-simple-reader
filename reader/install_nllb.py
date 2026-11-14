@@ -19,7 +19,6 @@ ASSETS = [
     ('tokenizer.json', 'e316b82de11d0f951f370943b3c438311629547285129b0b81dadabd01bca665'),
     ('model.bin', '89dc4b9eb7f4dcd3ff36023c9b1c55fcecb47ddc0df97ab31b068ef9cf194940'),
 ]
-PACKAGES = ['ctranslate2==4.8.2', 'tokenizers==0.23.3']
 
 
 def install(progress=None):
@@ -32,7 +31,8 @@ def install(progress=None):
             temp.replace(path)
     if not all(importlib.util.find_spec(name) for name in ('ctranslate2', 'tokenizers')):
         report('Installing offline translation runtime…')
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--only-binary=:all:', *PACKAGES],
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
+                        '-r', str(Path(__file__).resolve().with_name('lock-nllb.txt'))],
                        check=True, timeout=900, stdout=sys.stderr)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     for name, digest in ASSETS:

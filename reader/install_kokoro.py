@@ -9,7 +9,10 @@ import sys
 import tempfile
 import urllib.request
 from pathlib import Path
-from languages import JAPANESE_MODULES, JAPANESE_PACKAGES, KOKORO, kokoro_family
+from languages import JAPANESE_MODULES, KOKORO, kokoro_family
+
+# Hash locks for every pip install (copied next to this file by setup).
+LOCKS = Path(__file__).resolve().parent
 
 STANDARD = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/'
 GERMAN_REVISION = 'a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804'
@@ -98,13 +101,18 @@ def install(language, progress=None, check_only=False):
     folder.mkdir(parents=True, exist_ok=True)
     if not dependencies:
         report('Installing Kokoro runtime dependencies…')
-        subprocess.run([sys.executable, '-m', 'pip', 'install', 'kokoro-onnx==0.4.7', 'soundfile==0.14.0'],
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
+                        '-r', str(LOCKS / 'lock-base.txt')],
                        check=True, timeout=900)
     if japanese and not japanese_ready:
         report('Installing Japanese pronunciation dictionary (about 270 MB)…')
-        # unidic-lite is a pure-data source package; everything else is a wheel.
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--prefer-binary', *JAPANESE_PACKAGES],
-                       check=True, timeout=1800, stdout=sys.stderr)
+        # mojimoji (no CPython 3.14 wheel) and unidic-lite (data only) come as source
+        # packages: they are built against the locked build tools, without fetching others.
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
+                        '-r', str(LOCKS / 'lock-build.txt')], check=True, timeout=900, stdout=sys.stderr)
+        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:',
+                        '--no-binary=mojimoji', '--no-binary=unidic-lite', '--no-build-isolation', '--no-deps',
+                        '-r', str(LOCKS / 'lock-japanese.txt')], check=True, timeout=1800, stdout=sys.stderr)
     # Setup/repair must not silently revert a model installed by Update.
     if active:
         if not all(valid_asset(path, active.get('digests', {}).get(path.name, '')) for path in model_paths(language)):

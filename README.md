@@ -38,7 +38,9 @@ Both are stored in the widget's own entry in `~/.config/omarchy/shell.json` (`"c
 Hindi, Japanese and Chinese (about 330–354 MB plus runtime packages; Japanese adds a
 270 MB pronunciation dictionary). Piper covers the other languages with one voice each (60–122 MB plus a separate pinned runtime). Setup
 installs the matching Tesseract OCR data. The popup defaults to your desktop locale. Progress, retry and cancellation
-are built in; system package transactions request authorization and cannot be
+are built in: Cancel stops the running step's processes (including ones that left its process group),
+waits five seconds, ends what is left with SIGKILL and reaps all of them before setup reports
+**cancelled** and can be started again. System package transactions request authorization and cannot be
 cancelled from the popup. Setup does not start narration or add shortcuts.
 
 Existing managed reader installations are upgraded with a backup of runtime and service files
@@ -62,8 +64,15 @@ Nothing is installed when the plugin is added. Setup runs only when you press **
 - **User service** `~/.config/systemd/user/ocrvox.service` with the drop-in
   `ocrvox.service.d/read-aloud-runtime.conf`; setup stops, reloads and starts only this unit
   (`systemctl --user`). An existing unit not created by this plugin is left untouched.
-- **Private Python runtimes** under `~/.local/share/kindle-reader` (`venv`, `piper-runtime`) with pinned
-  packages, the `~/.local/bin/simple-reader` launcher and `~/.local/share/applications/simple-reader.desktop`.
+- **Private Python runtimes** under `~/.local/share/kindle-reader` (`venv`, `piper-runtime`), the
+  `~/.local/bin/simple-reader` launcher and `~/.local/share/applications/simple-reader.desktop`. Every
+  `pip install` (base runtime, Kokoro, Japanese dictionary, Piper, offline translator) reads a lock file
+  (`reader/lock-*.txt`) that lists each package, including every indirect one, at an exact version with the
+  SHA256 of each allowed file, and runs with `--require-hashes --no-deps`, so pip installs nothing else
+  and refuses a file whose bytes differ. Only wheels are accepted, except `mojimoji` (no CPython 3.14
+  wheel) and `unidic-lite` (data only), which are built from their hashed source packages against the
+  locked `setuptools`, `wheel` and `Cython` without fetching other build tools (this needs a C++
+  compiler). The locks are made for CPython 3.14 on Linux x86_64 by `update-locks.sh`.
   Replaced files are backed up in `~/.local/share/kindle-reader/backups/`.
 - **Downloads**, all from pinned revisions and checked with SHA256 before use: Kokoro models (GitHub
   release `model-files-v1.0`, Hugging Face `Godelaune/Kokoro-82M-ONNX-German-Martin`), Piper voices

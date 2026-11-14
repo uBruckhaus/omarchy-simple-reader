@@ -26,7 +26,8 @@ def install(data, language, run, report):
     report('Preparing separate Piper runtime…', 'runtime')
     if not python.exists():
         run([sys.executable, '-m', 'venv', runtime])
-    run([python, '-m', 'pip', 'install', '--only-binary=:all:', 'piper-tts==1.8.0'], stream=True)
+    run([python, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
+         '-r', Path(__file__).resolve().with_name('lock-piper.txt')], stream=True)
     prefix, name, model_digest, config_digest, size = PIPER[language]
     report(f'Downloading Piper voice (about {size} MB)…', 'voice')
     download_asset(name, BASE + prefix, model_digest, folder, report)

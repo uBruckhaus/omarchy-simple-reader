@@ -1,5 +1,6 @@
 """First-use setup, runnable with system Python before the reader exists."""
 import argparse
+import ctypes
 import datetime
 import fcntl
 import json
@@ -11,6 +12,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'reader'))
@@ -22,6 +24,9 @@ PACKAGES = {'grim': 'grim', 'slurp': 'slurp', 'magick': 'imagemagick',
             'tesseract': 'tesseract', 'mpv': 'mpv', 'wtype': 'wtype',
             'quickshell': 'quickshell', 'hyprctl': 'hyprland', 'pactl': 'libpulse'}
 MODULES = ('PySide6', 'kokoro_onnx', 'numpy', 'soundfile', 'onnxruntime')
+# Every pip install takes exact files from a lock with sha256 hashes (reader/lock-*.txt),
+# wheels only, and nothing the lock does not list.
+LOCKED = ('--require-hashes', '--only-binary=:all:', '--no-deps')
 child = None
 phase = ''
 
@@ -100,13 +105,78 @@ def run(args, stream=False):
         child = None
 
 
-def interrupted(*_):
-    if child is not None:
+def become_subreaper():
+    """Orphaned descendants (also ones that left the process group with setsid) are
+    re-parented to this process, so stop_descendants() can find and reap all of them."""
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
+    except (OSError, AttributeError):
+        return False
+
+
+def direct_children():
+    """PIDs whose parent is this process. Not yet reaped, so none of them can be reused."""
+    me, result = os.getpid(), []
+    for entry in os.listdir('/proc'):
+        if not entry.isdigit():
+            continue
         try:
-            os.killpg(child.pid, signal.SIGTERM)
-            child.wait(timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
+            stat = (Path('/proc') / entry / 'stat').read_bytes()
+            if int(stat[stat.rindex(b')') + 2:].split()[1]) == me:
+                result.append(int(entry))
+        except (OSError, ValueError, IndexError):
+            continue
+    return result
+
+
+def stop_descendants(leader=None, grace=5.0):
+    """Ends every descendant and returns once all of them are reaped: TERM to the
+    helper's group, `grace` seconds to exit, then SIGKILL generation by generation
+    (descendants of a killed child are re-parented here). A process this user may not
+    signal (a root package transaction) is waited for, not abandoned."""
+    leader_alive = leader is not None
+    if leader_alive:
+        try:
+            os.killpg(leader, signal.SIGTERM)  # leader not reaped yet: the group id is ours
+        except OSError:
             pass
+    deadline = time.monotonic() + grace
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == leader:
+            leader_alive = False
+        if pid == 0:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.05)
+    while True:
+        if leader_alive:
+            try:
+                os.killpg(leader, signal.SIGKILL)
+            except OSError:
+                pass
+        for pid in direct_children():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            pid, _ = os.waitpid(-1, 0)
+        except ChildProcessError:
+            return
+        if pid == leader:
+            leader_alive = False
+
+
+def interrupted(*_):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    report('Cancelling setup…', 'cancelling')
+    stop_descendants(child.pid if child is not None else None)
+    # Setup ownership (busy state, lock) ends only now that no helper is left.
     report('Setup cancelled. Installed files are kept; you can retry.', 'cancelled', False)
     raise SystemExit(130)
 
@@ -163,7 +233,7 @@ def install(language, backend_only=False, engine=None, ocr_language=None, transl
         if not python.exists():
             run([sys.executable, '-m', 'venv', DATA / 'venv'])
         if not runtime_ready():
-            run([python, '-m', 'pip', 'install', '-r', ROOT / 'requirements.txt'], stream=True)
+            run([python, '-m', 'pip', 'install', *LOCKED, '-r', ROOT / 'reader/lock-base.txt'], stream=True)
         backup = DATA / 'backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         backup.mkdir(parents=True)
         report('Updating reader runtime (existing files backed up)…', 'runtime')
@@ -172,7 +242,7 @@ def install(language, backend_only=False, engine=None, ocr_language=None, transl
         app = DATA / 'app'
         app.mkdir(exist_ok=True)
         for source in (ROOT / 'reader').iterdir():
-            if source.suffix not in ('.py', '.qml') or source.name.startswith('test_'):
+            if not (source.suffix in ('.py', '.qml') or (source.name.startswith('lock-') and source.suffix == '.txt')) or source.name.startswith('test_'):
                 continue
             target = app / source.name
             if target.exists():
@@ -240,6 +310,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 
 if __name__ == '__main__':
     os.umask(0o077)
+    become_subreaper()
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser()
     parser.add_argument('--language', choices=sorted(languages.LANGUAGES), default='de')

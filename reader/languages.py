@@ -239,7 +239,6 @@ PIPER = {
 QWEN_LANGUAGES = ('zh', 'en', 'ja', 'ko', 'de', 'fr', 'ru', 'pt', 'es', 'it')
 
 # Japanese needs its own grapheme-to-phoneme step; installed only with a Japanese Kokoro voice.
-JAPANESE_PACKAGES = ['misaki[ja]==0.7.4', 'fugashi==1.5.2', 'unidic-lite==1.0.8', 'jaconv==0.5.0', 'mojimoji==0.0.13']
 JAPANESE_MODULES = ('misaki', 'fugashi', 'unidic_lite', 'jaconv', 'mojimoji')
 
 # code: FLORES-200 language token of the offline NLLB-200 translator
