@@ -225,12 +225,14 @@ class PinnedWindowTests(unittest.TestCase):
         return json.dumps(dict(address=address, pid=99999, at=[10, 20], size=[800, 600],
                                title='Kindle', **{'class': 'kindle'}, **extra))
 
-    def hyprctl(self, workspace=2, active=2, hidden=False, special=0):
+    def hyprctl(self, workspace=2, active=2, hidden=False, special=0, focused='0x123', locked=False):
         import json
         clients = [dict(address='0x456', workspace=dict(id=active)),
                    dict(address='0x123', workspace=dict(id=workspace), hidden=hidden, stableId='1a')]
         monitors = [dict(activeWorkspace=dict(id=active), specialWorkspace=dict(id=special))]
-        return json.dumps(clients, indent=4) + '\n\n\n' + json.dumps(monitors, indent=4)
+        return (json.dumps(clients, indent=4) + '\n\n\n' + json.dumps(monitors, indent=4)
+                + '\n\n\n' + json.dumps(dict(address=focused) if focused else {})
+                + '\n\n\n' + json.dumps(dict(locked=locked)))
 
     def test_pinned_window_on_screen(self):
         from reader import pinned_window
@@ -343,17 +345,59 @@ class PinnedWindowTests(unittest.TestCase):
             pdf_keys=lambda: keys, update=Mock(), page_turn_sent=Mock())
         with patch('reader.Task') as task:
             Reader.do_page_turn(subject)
-            self.assertEqual(task.call_args.args[1], ['hyprctl', '--batch', 'j/clients;j/monitors'])
+            self.assertEqual(task.call_args.args[1], ['hyprctl', '--batch', 'j/clients;j/monitors;j/activewindow;j/locked'])
             task.call_args.args[2](0, out, '')
         return subject, task
 
-    def test_page_turn_goes_to_the_book_without_focus(self):
+    def test_page_turn_goes_to_the_focused_book_in_one_checked_step(self):
         subject, task = self.page_turn(self.hyprctl())
         self.assertEqual(task.call_count, 2)
         argv = task.call_args.args[1]
-        self.assertEqual(argv[:2], ['hyprctl', 'dispatch'])
-        self.assertIn('key = "Right"', argv[2])
-        self.assertIn('window = "address:0x123"', argv[2])
+        self.assertEqual(argv[:2], ['hyprctl', 'eval'])
+        lua = argv[2]
+        # Hyprland itself checks the focus right before sending the key.
+        self.assertLess(lua.index('w.address ~= "0x123"'), lua.index('hl.dsp.send_shortcut'))
+        self.assertLess(lua.index('hl.get_layers()'), lua.index('hl.dsp.send_shortcut'))
+        self.assertIn('key = "Right"', lua)
+        self.assertIn('window = "address:0x123"', lua)
+
+    def test_page_turn_waits_while_another_window_has_the_focus(self):
+        # send_shortcut would focus the book and tell it which keys are held elsewhere.
+        for out in (self.hyprctl(focused='0x456'), self.hyprctl(focused=None)):
+            subject, task = self.page_turn(out)
+            self.assertEqual(task.call_count, 1)
+            subject.update.assert_called_once_with('Waiting for the reading window')
+
+    def test_page_turn_waits_while_the_session_is_locked(self):
+        subject, task = self.page_turn(self.hyprctl(locked=True))
+        self.assertEqual(task.call_count, 1)
+        subject.update.assert_called_once_with('Waiting for the reading window')
+
+    def test_page_turn_waits_on_short_or_odd_hyprctl_output(self):
+        import json
+        for out in (self.hyprctl().rsplit('\n\n\n', 2)[0], self.hyprctl().replace('"locked": false', '"locked": "no"'),
+                    self.hyprctl().rsplit('\n\n\n', 1)[0] + '\n\n\n' + json.dumps([False])):
+            subject, task = self.page_turn(out)
+            self.assertEqual(task.call_count, 1)
+            subject.update.assert_called_once_with('Waiting for the reading window')
+
+    def test_focus_lost_inside_hyprland_defers_instead_of_failing(self):
+        from reader import Reader, TURN_DEFERRED
+        subject = SimpleNamespace(enabled=True, paused=False, update=Mock(), fail=Mock(), pdf_keys=lambda: None)
+        Reader.page_turn_sent(subject, 7, f'error: [string "local w"]:1: {TURN_DEFERRED}: focus', '')
+        subject.update.assert_called_once_with('Waiting for the reading window')
+        subject.fail.assert_not_called()
+        Reader.page_turn_sent(subject, 7, 'error: something else', '')
+        subject.fail.assert_called_once()
+
+    def test_page_turn_command_refuses_hostile_input(self):
+        from reader import page_turn_command, PASSIVE_LAYERS
+        self.assertIsNone(page_turn_command('0x1" }) hl.dsp.exec_cmd("rm -rf ~', 'Right'))
+        self.assertIsNone(page_turn_command('0x123', 'Right" }) os.execute("x'))
+        self.assertIsNone(page_turn_command('0x123', ''))
+        lua = page_turn_command('0x123', 'Next')[2]
+        for name in PASSIVE_LAYERS:
+            self.assertIn(f'["{name}"] = true', lua)
 
     def test_page_turn_waits_while_book_is_off_screen(self):
         subject, task = self.page_turn(self.hyprctl(workspace=3))

@@ -206,6 +206,8 @@ def install_size(code):
 
 # The book's window and the workspaces on screen, in one hyprctl call.
 PINNED_QUERY = ['hyprctl', '--batch', 'j/clients;j/monitors']
+# The same, plus the focused window and the lock state, for page turns.
+TURN_QUERY = ['hyprctl', '--batch', 'j/clients;j/monitors;j/activewindow;j/locked']
 
 
 def pinned_window(out, address):
@@ -224,6 +226,46 @@ def pinned_window(out, address):
             on_screen.add(monitor['specialWorkspace']['id'])
     window['shown'] = window.get('workspace', {}).get('id') in on_screen and not window.get('hidden')
     return window
+
+
+def book_has_focus(out, address):
+    """True only when TURN_QUERY output shows the book as the focused window and the
+    session unlocked. Hyprland's send_shortcut moves keyboard focus to its target, and a
+    window that gains focus is told which keys are held at that moment; when the book
+    already has focus, focus does not move and no other app's held keys reach it."""
+    decoder = json.JSONDecoder()
+    text, docs = out.lstrip(), []
+    for _ in range(4):
+        doc, end = decoder.raw_decode(text)
+        docs.append(doc)
+        text = text[end:].lstrip()
+    active, locked = docs[2], docs[3]
+    return (isinstance(active, dict) and active.get('address') == address
+            and isinstance(locked, dict) and locked.get('locked') is False)
+
+
+# Layer surfaces that never take the keyboard while a page turns: the Omarchy shell's
+# own bar, dock, notifications and this reader's highlight. Any other layer on top
+# (a launcher, a menu) may hold the keyboard, so the turn waits for it to close.
+PASSIVE_LAYERS = ('omarchy-bar', 'omarchy-dock', 'omarchy-notifications', 'ocrvox-highlight')
+TURN_DEFERRED = 'narrator-turn-deferred'
+
+
+def page_turn_command(address, key):
+    """hyprctl argv that sends `key` to the book in one step inside Hyprland, only while
+    the book is the focused window and no other layer may hold the keyboard. Checking
+    and sending in the compositor leaves no gap in which the focus could move. The
+    error carries TURN_DEFERRED when the turn has to wait. None for bad input."""
+    if not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address)) or not re.fullmatch(r'[A-Za-z0-9_]{1,24}', str(key)):
+        return None
+    passive = ', '.join(f'["{name}"] = true' for name in PASSIVE_LAYERS)
+    lua = (f'local w = hl.get_active_window() '
+           f'if not w or w.address ~= "{address}" then error("{TURN_DEFERRED}: focus") end '
+           f'local passive = {{ {passive} }} '
+           f'for _, l in ipairs(hl.get_layers()) do '
+           f'if (l.layer or 0) >= 2 and not passive[l.namespace or ""] then error("{TURN_DEFERRED}: layer") end end '
+           f'return hl.dispatch(hl.dsp.send_shortcut({{ mods = "", key = "{key}", window = "address:{address}" }}))')
+    return ['hyprctl', 'eval', lua]
 
 
 def desktop_notify(summary, body='', icon=None, timeout=None, level='info'):
@@ -1610,31 +1652,41 @@ class Reader(QObject):
     def do_page_turn(self):
         if not self.enabled or self.paused or not self.target:
             return
-        # The key goes to the pinned book even when another window has the focus;
-        # Hyprland hands it over without raising or focusing the book.
+        # The key goes to the pinned book only while it has the keyboard focus (and the
+        # session is unlocked): send_shortcut would otherwise focus it for the key, and a
+        # window gaining focus learns the keys held in the app that had it.
         epoch, address = self.epoch, self.target
         def located(code, out, err):
             if not self.enabled or self.paused or self.epoch != epoch or self.target != address:
                 return
             try:
                 window = pinned_window(out, address) if not code else {}
-            except (ValueError, TypeError, AttributeError):
-                window = {}
-            if not window.get('shown') or not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address)):
-                # On a workspace that is not on screen (or closed, which the next scan notices):
-                # turn when it is back.
-                print('Reader page turn deferred: the reading window is not on screen', file=sys.stderr, flush=True)
+                focused = bool(window) and book_has_focus(out, address)
+            except (ValueError, TypeError, AttributeError, IndexError):
+                window, focused = {}, False
+            if not window.get('shown') or not focused or not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address)):
+                # Off screen, without focus, locked (or closed, which the next scan notices):
+                # turn when the book is back in front with the focus.
+                print('Reader page turn deferred: the reading window is not on screen' if not window.get('shown')
+                      else 'Reader page turn deferred: the reading window does not have the focus',
+                      file=sys.stderr, flush=True)
                 self.update('Waiting for the reading window')
                 return
             keys = self.pdf_keys()
             # A page that continues below the window is scrolled first; otherwise next page.
             key = (keys[1] if getattr(self, 'pdf_cut_off', False) else keys[0]) if keys else 'Right'
-            Task(self, ['hyprctl', 'dispatch', f'hl.dsp.send_shortcut({{ mods = "", key = "{key}", window = "address:{address}" }})'],
-                 self.page_turn_sent, timeout=3)
-        Task(self, PINNED_QUERY, located, timeout=3)
+            argv = page_turn_command(address, key)
+            if argv:
+                Task(self, argv, self.page_turn_sent, timeout=3)
+        Task(self, TURN_QUERY, located, timeout=3)
 
     def page_turn_sent(self, code, out, err):
         if not self.enabled or self.paused:
+            return
+        if code and TURN_DEFERRED in (out or '') + (err or ''):
+            # The focus moved away between the check and the send: wait for it.
+            print('Reader page turn deferred: the reading window does not have the focus', file=sys.stderr, flush=True)
+            self.update('Waiting for the reading window')
             return
         if code:
             self.fail('Could not turn the page: ' + err)

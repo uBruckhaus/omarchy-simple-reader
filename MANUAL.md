@@ -1,6 +1,6 @@
 # Screen Narrator user manual
 
-Click the headphones icon in the Omarchy bar to open reading controls; right-click it to start or stop reading directly. In the popup, **▶ Start**, **❚❚ Pause** and **■ Stop** sit right under the summary. Start begins local OCR narration of the active window, which then stays the book: you can work in other windows meanwhile, even over it, and pages are still read and turned. Closing the book stops reading. Stop ends it. Pause/Resume controls playback and Read again restarts with the window that has the focus now. Closing the popup leaves narration running.
+Click the headphones icon in the Omarchy bar to open reading controls; right-click it to start or stop reading directly. In the popup, **▶ Start**, **❚❚ Pause** and **■ Stop** sit right under the summary. Start begins local OCR narration of the active window, which then stays the book: you can work in other windows meanwhile, even over it, and the page is still read; the next page is turned once the book has the focus again (the reader waits with **Waiting for the reading window**). Closing the book stops reading. Stop ends it. Pause/Resume controls playback and Read again restarts with the window that has the focus now. Closing the popup leaves narration running.
 
 Choose voice and text language (51 languages); set the reading speed (0.60×–2.00×) with the slider under the Start button: drag, click or scroll, or Tab to it and use ←/→; it is saved when you let go. Reading controls save immediately; provider setup applies after a successful test and Use provider. Enable following page changes, Kindle cropping, PDF page detection, page turning and passage highlighting as needed. Select area closes the popup before region selection; Reset area clears it.
 
@@ -72,6 +72,8 @@ Whisper is speech recognition, so it is not offered as a reading voice.
 3. Only the page is read. The toolbar, thumbnails and the next page are skipped, and page
    numbers at the top or bottom ("12", "- 12 -", "Page 3", "Seite 3 von 10") are not spoken.
 4. With **Turn Kindle and PDF pages after reading** on, the next page follows automatically.
+   The page turns only while the book window has the focus: a key sent to an unfocused window
+   would tell it which keys are held in the app you are using. Click the book to continue.
    A page taller than the window is scrolled down first. After the last page the reader turns
    off and shows **End of document**.
 

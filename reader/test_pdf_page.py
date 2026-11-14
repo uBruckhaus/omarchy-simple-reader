@@ -84,7 +84,8 @@ class PageTurnTests(unittest.TestCase):
             if args[0] == 'hyprctl' and args[1] == '--batch':
                 # The book on the workspace that is on screen.
                 done(0, json.dumps([dict(address=address, workspace=dict(id=1))]) + '\n\n'
-                     + json.dumps([dict(activeWorkspace=dict(id=1), specialWorkspace=dict(id=0))]), '')
+                     + json.dumps([dict(activeWorkspace=dict(id=1), specialWorkspace=dict(id=0))]) + '\n\n'
+                     + json.dumps(dict(address=address)) + '\n\n' + json.dumps(dict(locked=False)), '')
             else:
                 sent.append(args)
         with patch('reader.Task', side_effect=task):
@@ -93,7 +94,9 @@ class PageTurnTests(unittest.TestCase):
 
     def test_next_page_or_scroll_sent_to_the_window(self):
         sent = self.turn('0x5d42d0731a60', False)
-        self.assertEqual(sent, [['hyprctl', 'dispatch', 'hl.dsp.send_shortcut({ mods = "", key = "n", window = "address:0x5d42d0731a60" })']])
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][:2], ['hyprctl', 'eval'])
+        self.assertIn('hl.dsp.send_shortcut({ mods = "", key = "n", window = "address:0x5d42d0731a60" })', sent[0][2])
         self.assertIn('key = "Next"', self.turn('0x5d42d0731a60', True)[0][2])
 
     def test_unexpected_window_address_is_not_formatted_into_a_command(self):
