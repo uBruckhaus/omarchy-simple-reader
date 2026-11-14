@@ -303,6 +303,16 @@ class ClipboardTests(unittest.TestCase):
             self.assertIn('TimeoutStopSec=30', drop_in)
             self.assertIn('TimeoutStopSec=30', unit.read_text())
 
+    def test_optional_installers_never_run_pip_in_an_unverified_runtime(self):
+        import importlib, sys
+        sys.path.insert(0, str(Path(setup.__file__).resolve().parent / 'reader'))
+        install_nllb = importlib.import_module('install_nllb')
+        with tempfile.TemporaryDirectory() as folder, patch.object(install_nllb.sys, 'prefix', folder), \
+             patch.object(install_nllb.subprocess, 'run') as run:
+            with self.assertRaises(RuntimeError):
+                install_nllb.install()
+        run.assert_not_called()
+
     def test_existing_runtime_without_marker_is_not_ready(self):
         with tempfile.TemporaryDirectory() as folder:
             data = Path(folder); (data / 'venv/bin').mkdir(parents=True); (data / 'venv/bin/python').write_text('')

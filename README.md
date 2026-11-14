@@ -81,7 +81,10 @@ Nothing is installed when the plugin is added. Setup runs only when you press **
   record (for example from an older release) is never upgraded in place or trusted because its modules
   import: setup moves it aside, makes a new one with the system Python's `venv` module (interpreter and
   `pip` from the Arch `python` package), installs the lock into it and then deletes the old one (or puts
-  it back if the install fails). Optional parts (Japanese dictionary, offline translator) are installed
+  it back if the install fails; if setup is cancelled in that step, the old runtime stays in
+  `~/.local/share/kindle-reader/backups/` and the next setup builds a new one). Optional installers
+  (Kokoro voice, Japanese dictionary, offline translator) run pip only in a runtime verified against the
+  base lock and otherwise ask for setup first. Optional parts (Japanese dictionary, offline translator) are installed
   again from their locks when next needed.
   Replaced files are backed up in `~/.local/share/kindle-reader/backups/`.
 - **Downloads**, all from pinned revisions and checked with SHA256 before use: Kokoro models (GitHub
