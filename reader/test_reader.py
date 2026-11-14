@@ -358,8 +358,10 @@ class PinnedWindowTests(unittest.TestCase):
         # Hyprland itself checks the focus right before sending the key.
         self.assertLess(lua.index('w.address ~= "0x123"'), lua.index('hl.dsp.send_shortcut'))
         self.assertLess(lua.index('hl.get_layers()'), lua.index('hl.dsp.send_shortcut'))
-        self.assertIn('key = "Right"', lua)
-        self.assertIn('window = "address:0x123"', lua)
+        self.assertIn('send_shortcut({ mods = "", key = "Right" })', lua)
+        # No window is named, so Hyprland never moves the keyboard focus for the key.
+        self.assertNotIn('window =', lua)
+        self.assertIn('l.interactivity ~= 0', lua)
 
     def test_page_turn_waits_while_another_window_has_the_focus(self):
         # send_shortcut would focus the book and tell it which keys are held elsewhere.
@@ -391,13 +393,12 @@ class PinnedWindowTests(unittest.TestCase):
         subject.fail.assert_called_once()
 
     def test_page_turn_command_refuses_hostile_input(self):
-        from reader import page_turn_command, PASSIVE_LAYERS
+        from reader import page_turn_command
         self.assertIsNone(page_turn_command('0x1" }) hl.dsp.exec_cmd("rm -rf ~', 'Right'))
         self.assertIsNone(page_turn_command('0x123', 'Right" }) os.execute("x'))
         self.assertIsNone(page_turn_command('0x123', ''))
-        lua = page_turn_command('0x123', 'Next')[2]
-        for name in PASSIVE_LAYERS:
-            self.assertIn(f'["{name}"] = true', lua)
+        # No layer namespace is trusted: any layer that accepts the keyboard defers the turn.
+        self.assertNotIn('namespace', page_turn_command('0x123', 'Next')[2])
 
     def test_page_turn_waits_while_book_is_off_screen(self):
         subject, task = self.page_turn(self.hyprctl(workspace=3))

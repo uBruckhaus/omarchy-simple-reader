@@ -244,27 +244,25 @@ def book_has_focus(out, address):
             and isinstance(locked, dict) and locked.get('locked') is False)
 
 
-# Layer surfaces that never take the keyboard while a page turns: the Omarchy shell's
-# own bar, dock, notifications and this reader's highlight. Any other layer on top
-# (a launcher, a menu) may hold the keyboard, so the turn waits for it to close.
-PASSIVE_LAYERS = ('omarchy-bar', 'omarchy-dock', 'omarchy-notifications', 'ocrvox-highlight')
 TURN_DEFERRED = 'narrator-turn-deferred'
 
 
 def page_turn_command(address, key):
-    """hyprctl argv that sends `key` to the book in one step inside Hyprland, only while
-    the book is the focused window and no other layer may hold the keyboard. Checking
-    and sending in the compositor leaves no gap in which the focus could move. The
-    error carries TURN_DEFERRED when the turn has to wait. None for bad input."""
+    """hyprctl argv that turns the book's page without moving the keyboard focus.
+
+    send_shortcut with a `window` focuses that window for the key, and a window that gains
+    the focus is told which keys are held, so no window is named: the key goes to whatever
+    holds the keyboard. One Lua chunk in Hyprland first checks that this is the book (it is
+    the focused window and no layer surface, such as a launcher or a shell panel, accepts
+    keyboard input), so check and key leave no gap. The error carries TURN_DEFERRED when the
+    turn has to wait. None for bad input."""
     if not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address)) or not re.fullmatch(r'[A-Za-z0-9_]{1,24}', str(key)):
         return None
-    passive = ', '.join(f'["{name}"] = true' for name in PASSIVE_LAYERS)
     lua = (f'local w = hl.get_active_window() '
            f'if not w or w.address ~= "{address}" then error("{TURN_DEFERRED}: focus") end '
-           f'local passive = {{ {passive} }} '
            f'for _, l in ipairs(hl.get_layers()) do '
-           f'if (l.layer or 0) >= 2 and not passive[l.namespace or ""] then error("{TURN_DEFERRED}: layer") end end '
-           f'return hl.dispatch(hl.dsp.send_shortcut({{ mods = "", key = "{key}", window = "address:{address}" }}))')
+           f'if l.mapped ~= false and l.interactivity ~= 0 then error("{TURN_DEFERRED}: layer") end end '
+           f'return hl.dispatch(hl.dsp.send_shortcut({{ mods = "", key = "{key}" }}))')
     return ['hyprctl', 'eval', lua]
 
 

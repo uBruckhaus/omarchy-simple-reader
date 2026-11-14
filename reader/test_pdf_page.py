@@ -96,7 +96,8 @@ class PageTurnTests(unittest.TestCase):
         sent = self.turn('0x5d42d0731a60', False)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0][:2], ['hyprctl', 'eval'])
-        self.assertIn('hl.dsp.send_shortcut({ mods = "", key = "n", window = "address:0x5d42d0731a60" })', sent[0][2])
+        self.assertIn('w.address ~= "0x5d42d0731a60"', sent[0][2])
+        self.assertIn('hl.dsp.send_shortcut({ mods = "", key = "n" })', sent[0][2])
         self.assertIn('key = "Next"', self.turn('0x5d42d0731a60', True)[0][2])
 
     def test_unexpected_window_address_is_not_formatted_into_a_command(self):
