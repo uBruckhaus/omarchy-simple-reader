@@ -51,23 +51,41 @@ def locked_packages(name):
     return names
 
 
-def install(python, prefix, name, run):
+def install(python, prefix, name, run, mark=True):
     """Installs every file of lock `name` (and the locks it needs) with its hash checked,
-    replacing what the runtime had, then records the marker. `run(argv)` raises on failure."""
+    replacing what the runtime had, then records the marker (unless mark=False: the
+    caller records it with complete() once the runtime is also pruned). `run(argv)` raises
+    on failure."""
     for needed in NEEDS.get(name, ()):
         if not verified(prefix, needed):
             install(python, prefix, needed, run)
     marker(prefix, name).unlink(missing_ok=True)
     run([str(python), '-m', 'pip', 'install', *PIP, *EXTRA.get(name, ()), '--force-reinstall',
          '-r', str(lock_file(name))])
+    if mark:
+        complete(prefix, name)
+
+
+def complete(prefix, name):
     marker(prefix, name).write_text(digest(name) + '\n')
 
 
-def prune(python, prefix, run, keep_locks):
+def rebuild(python, prefix, name, run, keep_locks):
+    """The runtime's own lock: install, prune, and only then record it as verified, so an
+    interrupted run is redone in full next time."""
+    install(python, prefix, name, run, mark=False)
+    prune(python, prefix, run, keep_locks, current=name)
+    complete(prefix, name)
+
+
+def prune(python, prefix, run, keep_locks, current=None):
     """Removes every distribution that no verified lock in `keep_locks` lists (pip itself
-    stays), so nothing unverified from an older runtime remains importable."""
-    allowed = {'pip'}
+    stays), so nothing unverified from an older runtime remains importable. `current` is
+    the lock just installed, whose marker is written only after this."""
+    allowed = {'pip'} | (locked_packages(current) if current else set())
     for name in keep_locks:
+        if name == current:
+            continue
         if verified(prefix, name):
             allowed |= locked_packages(name)
         else:

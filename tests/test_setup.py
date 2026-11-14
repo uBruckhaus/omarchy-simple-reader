@@ -255,6 +255,32 @@ class ClipboardTests(unittest.TestCase):
             self.assertEqual(calls, [['py', '-m', 'pip', 'uninstall', '--disable-pip-version-check', '-y', 'ctranslate2', 'piper-tts']])
             self.assertFalse(lock_install.marker(prefix, 'nllb').exists())
 
+    def test_runtime_counts_as_verified_only_after_install_and_prune(self):
+        import lock_install
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder)
+            def broken_prune(*a, **k):
+                raise RuntimeError('cancelled during prune')
+            with patch.object(lock_install, 'prune', side_effect=broken_prune):
+                with self.assertRaises(RuntimeError):
+                    lock_install.rebuild('py', prefix, 'base', lambda argv: None, ('base', 'nllb'))
+            self.assertFalse(lock_install.verified(prefix, 'base'))   # the retry redoes install + prune
+            with patch.object(lock_install, 'prune') as prune:
+                lock_install.rebuild('py', prefix, 'base', lambda argv: None, ('base', 'nllb'))
+            self.assertEqual(prune.call_args.kwargs['current'], 'base')
+            self.assertTrue(lock_install.verified(prefix, 'base'))
+
+    def test_helper_tree_is_ended_when_streaming_fails(self):
+        import subprocess, sys
+        with patch.object(setup, 'report', side_effect=OSError('disk full')), \
+             patch.object(setup, 'stop_descendants') as stop, patch('setup_backend.signal.signal'):
+            with self.assertRaises(OSError):
+                setup.run([sys.executable, '-c', 'print("line", flush=True); import time; time.sleep(30)'], stream=True)
+        stop.assert_called_once()
+        self.assertIsNone(setup.child)
+        import os
+        os.killpg(stop.call_args.args[0], 9); os.waitpid(stop.call_args.args[0], 0)  # the mock did not reap it
+
     def test_existing_runtime_without_marker_is_not_ready(self):
         with tempfile.TemporaryDirectory() as folder:
             data = Path(folder); (data / 'venv/bin').mkdir(parents=True); (data / 'venv/bin/python').write_text('')

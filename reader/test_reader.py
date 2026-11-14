@@ -542,3 +542,22 @@ class InstallCancelTests(unittest.TestCase):
         from reader import Reader
         for method in (Reader.install_kokoro, Reader.install_translator, Reader.check_kokoro_updates):
             self.assertIn('tree=True', inspect.getsource(method))
+
+    def test_stopping_reading_never_kills_an_installer_supervisor(self):
+        from reader import Task
+        task = SimpleNamespace(tree=True, stop=Mock(), proc=Mock(), cancelled=False)
+        Task.cancel(task)
+        task.stop.assert_called_once()
+        task.proc.kill.assert_not_called()
+        self.assertFalse(task.cancelled)          # its callback still clears the install state
+
+    def test_stop_speech_keeps_a_running_install_busy(self):
+        from reader import Reader
+        subject = SimpleNamespace(install_task=Mock(), installing_kokoro=True, kokoro_checking=True, models_loading=False,
+                                  epoch=1, overlay=Mock(), mpv_command=Mock(), speech_tasks=set(), tasks=set())
+        with patch('reader.subprocess.run'):
+            try:
+                Reader.stop_speech(subject)
+            except AttributeError:
+                pass  # later attributes are not needed for this check
+        self.assertTrue(subject.installing_kokoro)

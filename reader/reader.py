@@ -508,13 +508,14 @@ class Task(QObject):
             self.proc.kill()
 
     def stop(self):
-        """Tree tasks: SIGTERM, so proc_tree reaps the helper's descendants; `done` runs once
-        it has exited. SIGKILL only if the wrapper itself does not end within 30 s."""
+        """Tree tasks: SIGTERM, so proc_tree ends and reaps the helper's descendants (5 s,
+        then SIGKILL); `done` runs once it has exited. The wrapper is never killed itself:
+        that would leave its descendants unreaped. Stopping ocrvox.service ends its whole
+        cgroup (KillMode=control-group) as the last boundary."""
         if self.stopping or self.proc.state() == QProcess.ProcessState.NotRunning:
             return
         self.stopping = True
         self.proc.terminate()
-        QTimer.singleShot(30000, self, lambda: self.proc.kill() if self.proc.state() != QProcess.ProcessState.NotRunning else None)
 
     def finish(self, code, *_):
         if self not in self.owner.tasks:
@@ -531,6 +532,10 @@ class Task(QObject):
         self.deleteLater()
 
     def cancel(self):
+        if self.tree:
+            # Never SIGKILL a supervisor; its callback still runs and clears the install state.
+            self.stop()
+            return
         self.cancelled = True
         self.proc.kill()
         self.proc.waitForFinished(1000)
@@ -848,7 +853,8 @@ class Reader(QObject):
     def stop_speech(self):
         self.kokoro_checking = False
         self.models_loading = False
-        self.installing_kokoro = False
+        if getattr(self, 'install_task', None) is None:
+            self.installing_kokoro = False  # a running installer clears it when its tree is gone
         self.epoch += 1
         self.overlay.show([])
         self.highlight_queue = []
@@ -2156,6 +2162,10 @@ class Reader(QObject):
 
     def shutdown(self):
         self.set_enabled(False)
+        # Installers end their whole process tree before the reader exits.
+        for task in [task for task in list(self.tasks) if task.tree]:
+            task.stop()
+            task.proc.waitForFinished(20000)
         self.server.close()
         self.tray.hide()
 

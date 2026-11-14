@@ -106,7 +106,14 @@ def run(args, stream=False):
         if wait_reaped(child, forget):
             raise RuntimeError('\n'.join(tail)[-1200:] or 'Command failed: ' + str(args[0]))
     finally:
-        child = None
+        if child is not None:
+            # Left early (an exception while streaming): end and reap the helper's tree
+            # before setup can release its lock. The leader is still unreaped here.
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            try:
+                stop_descendants(child.pid)
+            finally:
+                child = None
 
 
 def interrupted(*_):
@@ -180,8 +187,7 @@ def install(language, backend_only=False, engine=None, ocr_language=None, transl
         if not runtime_ready():
             # The reader runs from this runtime: stop it before files are replaced.
             run(['systemctl', '--user', 'stop', 'ocrvox.service']) if existing else None
-            lock_install.install(python, DATA / 'venv', 'base', lambda argv: run(argv, stream=True))
-            lock_install.prune(python, DATA / 'venv', run, RUNTIME_LOCKS)
+            lock_install.rebuild(python, DATA / 'venv', 'base', lambda argv: run(argv, stream=True), RUNTIME_LOCKS)
         backup = DATA / 'backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         backup.mkdir(parents=True)
         report('Updating reader runtime (existing files backed up)…', 'runtime')
