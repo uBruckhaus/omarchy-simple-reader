@@ -40,7 +40,9 @@ Hindi, Japanese and Chinese (about 330–354 MB plus runtime packages; Japanese 
 installs the matching Tesseract OCR data. The popup defaults to your desktop locale. Progress, retry and cancellation
 are built in: Cancel stops the running step's processes (including ones that left its process group),
 waits five seconds, ends what is left with SIGKILL and reaps all of them before setup reports
-**cancelled** and can be started again. System package transactions request authorization and cannot be
+**cancelled** and can be started again. The Kokoro voice, Kokoro model update and offline translator
+installers in the popup run under the same supervisor (`reader/proc_tree.py`); their Cancel shows
+**Cancelling…** until every process they started is gone. System package transactions request authorization and cannot be
 cancelled from the popup. Setup does not start narration or add shortcuts.
 
 Existing managed reader installations are upgraded with a backup of runtime and service files
@@ -72,7 +74,11 @@ Nothing is installed when the plugin is added. Setup runs only when you press **
   and refuses a file whose bytes differ. Only wheels are accepted, except `mojimoji` (no CPython 3.14
   wheel) and `unidic-lite` (data only), which are built from their hashed source packages against the
   locked `setuptools`, `wheel` and `Cython` without fetching other build tools (this needs a C++
-  compiler). The locks are made for CPython 3.14 on Linux x86_64 by `update-locks.sh`.
+  compiler). The locks are made for CPython 3.14 on Linux x86_64 by `update-locks.sh`. Each runtime
+  records the SHA256 of the lock it was installed from (`.verified-<lock>`); a runtime without a current
+  record (for example from an older release) is not trusted because its modules import: setup reinstalls
+  every locked package from the lock (`--force-reinstall`) and removes every package no verified lock
+  lists, so only checked files remain. `pip` itself comes from the system Python's own venv module.
   Replaced files are backed up in `~/.local/share/kindle-reader/backups/`.
 - **Downloads**, all from pinned revisions and checked with SHA256 before use: Kokoro models (GitHub
   release `model-files-v1.0`, Hugging Face `Godelaune/Kokoro-82M-ONNX-German-Martin`), Piper voices

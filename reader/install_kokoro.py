@@ -10,9 +10,8 @@ import tempfile
 import urllib.request
 from pathlib import Path
 from languages import JAPANESE_MODULES, KOKORO, kokoro_family
+import lock_install
 
-# Hash locks for every pip install (copied next to this file by setup).
-LOCKS = Path(__file__).resolve().parent
 
 STANDARD = 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/'
 GERMAN_REVISION = 'a1cba7fbf0e72fbae38f0a3a48ce0dc8e6077804'
@@ -90,8 +89,10 @@ def install(language, progress=None, check_only=False):
             temp = path.with_suffix('.tmp')
             temp.write_text(json.dumps({'message': message}))
             temp.replace(path)
-    dependencies = all(importlib.util.find_spec(name) for name in ('kokoro_onnx', 'soundfile', 'onnxruntime'))
-    japanese_ready = all(importlib.util.find_spec(name) for name in JAPANESE_MODULES)
+    dependencies = (lock_install.verified(sys.prefix, 'base') and
+                    all(importlib.util.find_spec(name) for name in ('kokoro_onnx', 'soundfile', 'onnxruntime')))
+    japanese_ready = (lock_install.verified(sys.prefix, 'japanese') and
+                      all(importlib.util.find_spec(name) for name in JAPANESE_MODULES))
     from kokoro_updates import active_models, model_paths, update
     active = active_models().get(language, {})
     if check_only:
@@ -99,20 +100,16 @@ def install(language, progress=None, check_only=False):
             return dependencies and all(valid_asset(path, active.get('digests', {}).get(path.name, '')) for path in model_paths(language))
         return dependencies and (japanese_ready or not japanese) and all(valid_asset(folder / name, digest) for name, _, digest in ASSETS[language])
     folder.mkdir(parents=True, exist_ok=True)
+    def pip(argv, timeout):
+        subprocess.run(argv, check=True, timeout=timeout, stdout=sys.stderr)
     if not dependencies:
         report('Installing Kokoro runtime dependencies…')
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
-                        '-r', str(LOCKS / 'lock-base.txt')],
-                       check=True, timeout=900)
+        lock_install.install(sys.executable, sys.prefix, 'base', lambda argv: pip(argv, 900))
     if japanese and not japanese_ready:
         report('Installing Japanese pronunciation dictionary (about 270 MB)…')
-        # mojimoji (no CPython 3.14 wheel) and unidic-lite (data only) come as source
-        # packages: they are built against the locked build tools, without fetching others.
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
-                        '-r', str(LOCKS / 'lock-build.txt')], check=True, timeout=900, stdout=sys.stderr)
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:',
-                        '--no-binary=mojimoji', '--no-binary=unidic-lite', '--no-build-isolation', '--no-deps',
-                        '-r', str(LOCKS / 'lock-japanese.txt')], check=True, timeout=1800, stdout=sys.stderr)
+        # mojimoji (no CPython 3.14 wheel) and unidic-lite (data only) are built from their
+        # hashed source packages against lock-build.txt, without fetching other build tools.
+        lock_install.install(sys.executable, sys.prefix, 'japanese', lambda argv: pip(argv, 1800))
     # Setup/repair must not silently revert a model installed by Update.
     if active:
         if not all(valid_asset(path, active.get('digests', {}).get(path.name, '')) for path in model_paths(language)):

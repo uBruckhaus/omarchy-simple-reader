@@ -465,9 +465,14 @@ def make_icon(state):
 
 class Task(QObject):
     """One cancellable subprocess. A killed process never invokes its callback."""
-    def __init__(self, owner, args, done, timeout=180, stdin_data=None, close_stdin=False):
+    def __init__(self, owner, args, done, timeout=180, stdin_data=None, close_stdin=False, tree=False):
         super().__init__(owner)
         self.owner, self.done, self.cancelled = owner, done, False
+        # tree: run under proc_tree.py, which ends and reaps everything the helper started
+        # (pip and its children) on SIGTERM; stop() waits for that before `done` runs.
+        self.tree, self.stopping = tree, False
+        if tree:
+            args = [sys.executable, str(Path(__file__).with_name('proc_tree.py')), *args]
         if close_stdin:
             # QProcess hands every child a pipe on stdin. slurp treats a piped stdin as
             # "restrict boxes from stdin" mode: it blocks reading stdin and never grabs
@@ -497,7 +502,19 @@ class Task(QObject):
             self.finish(-1)
 
     def expire(self):
-        self.proc.kill()
+        if self.tree:
+            self.stop()
+        else:
+            self.proc.kill()
+
+    def stop(self):
+        """Tree tasks: SIGTERM, so proc_tree reaps the helper's descendants; `done` runs once
+        it has exited. SIGKILL only if the wrapper itself does not end within 30 s."""
+        if self.stopping or self.proc.state() == QProcess.ProcessState.NotRunning:
+            return
+        self.stopping = True
+        self.proc.terminate()
+        QTimer.singleShot(30000, self, lambda: self.proc.kill() if self.proc.state() != QProcess.ProcessState.NotRunning else None)
 
     def finish(self, code, *_):
         if self not in self.owner.tasks:
@@ -1936,7 +1953,10 @@ class Reader(QObject):
             args += ['--update', '--progress', progress]
         def done(code, out, err):
             self.kokoro_checking = self.installing_kokoro = False
-            self.install_task = None
+            task, self.install_task = self.install_task, None
+            if task is not None and task.stopping:
+                self.provider_status = 'Kokoro model update cancelled'
+                return
             if code:
                 self.provider_status = 'Model update failed: ' + err.strip()[-500:]
                 return
@@ -1946,7 +1966,7 @@ class Reader(QObject):
                 self.provider_status = result['message']
             except (ValueError, KeyError, TypeError):
                 self.provider_status = 'Cannot read model update result'
-        self.install_task = Task(self, args, done, timeout=1800 if update else 90)
+        self.install_task = Task(self, args, done, timeout=1800 if update else 90, tree=True)
 
     def configure_translator_token(self, token, remember):
         if not isinstance(token, str) or '\n' in token or '\r' in token or len(token) > 16384 or not isinstance(remember, bool):
@@ -2002,19 +2022,23 @@ class Reader(QObject):
         progress.unlink(missing_ok=True)
         def done(code, out, err):
             self.installing_translator = False
-            self.translator_install_task = None
+            task, self.translator_install_task = self.translator_install_task, None
+            if task is not None and task.stopping:
+                self.translation_status = 'Offline translator installation cancelled; verified files are kept.'
+                return
             if not code:
                 self.settings['translator'] = 'nllb' if self.settings.get('translate_to') else self.settings['translator']
                 self.save()
             self.translation_status = 'Offline translator installed. Choose Test translation.' if not code else (err.strip()[-500:] or 'Offline translator installation failed. Retry when your network is available.')
-        self.translator_install_task = Task(self, [sys.executable, Path(__file__).with_name('install_nllb.py'), '--progress', progress], done, timeout=3600)
+        self.translator_install_task = Task(self, [sys.executable, Path(__file__).with_name('install_nllb.py'), '--progress', progress], done, timeout=3600, tree=True)
 
     def cancel_translator_install(self):
+        # Stays "installing" until the installer and everything it started are gone.
         if self.translator_install_task:
-            self.translator_install_task.cancel()
-            self.translator_install_task = None
-        self.installing_translator = False
-        self.translation_status = 'Offline translator installation cancelled; verified files are kept.'
+            self.translator_install_task.stop()
+            self.translation_status = 'Cancelling the offline translator installation…'
+        else:
+            self.installing_translator = False
 
     def translator_install_status(self):
         if self.installing_translator:
@@ -2036,21 +2060,25 @@ class Reader(QObject):
         progress.unlink(missing_ok=True)
         def done(code, out, err):
             self.installing_kokoro = False
-            self.install_task = None
+            task, self.install_task = self.install_task, None
+            if task is not None and task.stopping:
+                self.provider_status = 'Kokoro installation cancelled'
+                return
             if code:
                 self.provider_status = err.strip()[-500:] or 'Kokoro installation failed. Retry when your network is available.'
                 return
             self.provider_status = 'Kokoro installed for ' + languages.name(language)
             self.auto_configure()
         self.install_task = Task(self, [sys.executable, Path(__file__).with_name('install_kokoro.py'),
-                                        '--language', language, '--progress', progress], done, timeout=1800)
+                                        '--language', language, '--progress', progress], done, timeout=1800, tree=True)
 
     def cancel_kokoro_install(self):
+        # Stays "installing" until the installer and everything it started are gone.
         if self.install_task:
-            self.install_task.cancel()
-        self.install_task = None
-        self.installing_kokoro = False
-        self.provider_status = 'Kokoro installation cancelled'
+            self.install_task.stop()
+            self.provider_status = 'Cancelling the Kokoro installation…'
+        else:
+            self.installing_kokoro = False
 
     def connection(self):
         client = self.server.nextPendingConnection()

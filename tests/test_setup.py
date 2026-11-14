@@ -210,23 +210,114 @@ class ClipboardTests(unittest.TestCase):
             bridge.run_bounded(['sleep', '30'], 1024, 1)             # owner that never answers
         self.assertLess(time.monotonic() - start, 4)
 
-    def test_every_pip_install_takes_hashed_files_from_a_lock(self):
+    def test_every_pip_install_goes_through_the_hash_locked_installer(self):
         import re
         root = Path(setup.__file__).resolve().parent
-        sources = [root / 'setup_backend.py', *sorted((root / 'reader').glob('*.py'))]
-        sites = 0
-        for path in sources:
-            if path.name.startswith('test_'):
+        for path in [root / 'setup_backend.py', *sorted((root / 'reader').glob('*.py'))]:
+            if path.name.startswith('test_') or path.name == 'lock_install.py':
                 continue
-            text = path.read_text()
-            for match in re.finditer(r"'pip', 'install'(.{0,400}?)\]", text, re.S):
-                sites += 1
-                call = match.group(1)
-                self.assertTrue('--require-hashes' in call or '*LOCKED' in call, (path.name, call))
-                self.assertTrue('--no-deps' in call or '*LOCKED' in call, (path.name, call))
-                self.assertIn('lock-', call, (path.name, call))
-        self.assertEqual(sites, 6)  # base, Kokoro deps, build tools, Japanese, translator, Piper
-        self.assertEqual(setup.LOCKED, ('--require-hashes', '--only-binary=:all:', '--no-deps'))
+            self.assertNotRegex(path.read_text(), r"'pip'", path.name)
+        import lock_install
+        self.assertEqual(lock_install.PIP, ('--disable-pip-version-check', '--require-hashes', '--only-binary=:all:', '--no-deps'))
+
+    def test_lock_install_marks_only_after_a_verified_install(self):
+        import lock_install
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder)
+            calls = []
+            lock_install.install('py', prefix, 'japanese', calls.append)
+            # The build tools come first; every call is hash-checked and replaces what was there.
+            self.assertEqual([c[-1].rsplit('/', 1)[-1] for c in calls], ['lock-build.txt', 'lock-japanese.txt'])
+            for call in calls:
+                self.assertIn('--require-hashes', call); self.assertIn('--force-reinstall', call); self.assertIn('--no-deps', call)
+            self.assertIn('--no-build-isolation', calls[1])
+            self.assertTrue(lock_install.verified(prefix, 'japanese') and lock_install.verified(prefix, 'build'))
+            # A failed install leaves no marker; a stale marker (older lock) does not count.
+            def fail(argv):
+                raise RuntimeError('pip failed')
+            with self.assertRaises(RuntimeError):
+                lock_install.install('py', prefix, 'nllb', fail)
+            self.assertFalse(lock_install.verified(prefix, 'nllb'))
+            lock_install.marker(prefix, 'base').write_text('0' * 64 + '\n')
+            self.assertFalse(lock_install.verified(prefix, 'base'))
+
+    def test_prune_removes_everything_no_verified_lock_lists(self):
+        import lock_install
+        with tempfile.TemporaryDirectory() as folder:
+            prefix = Path(folder)
+            lock_install.marker(prefix, 'base').write_text(lock_install.digest('base') + '\n')
+            lock_install.marker(prefix, 'nllb').write_text('stale\n')
+            listing = json.dumps([{'name': 'pip'}, {'name': 'PySide6'}, {'name': 'numpy'},
+                                  {'name': 'piper-tts'}, {'name': 'ctranslate2'}])
+            calls = []
+            with patch('lock_install.subprocess.run', return_value=type('R', (), {'stdout': listing})()):
+                lock_install.prune('py', prefix, calls.append, ('base', 'nllb'))
+            self.assertEqual(calls, [['py', '-m', 'pip', 'uninstall', '--disable-pip-version-check', '-y', 'ctranslate2', 'piper-tts']])
+            self.assertFalse(lock_install.marker(prefix, 'nllb').exists())
+
+    def test_existing_runtime_without_marker_is_not_ready(self):
+        with tempfile.TemporaryDirectory() as folder:
+            data = Path(folder); (data / 'venv/bin').mkdir(parents=True); (data / 'venv/bin/python').write_text('')
+            with patch.object(setup, 'DATA', data), patch('setup_backend.subprocess.run') as run:
+                self.assertFalse(setup.runtime_ready())
+            run.assert_not_called()
+
+    def test_reaping_and_forgetting_the_helper_happen_with_sigterm_blocked(self):
+        import signal, subprocess, sys
+        from proc_tree import wait_reaped
+        seen = []
+        process = subprocess.Popen([sys.executable, '-c', 'pass'])
+        wait_reaped(process, lambda: seen.append(signal.SIGTERM in signal.pthread_sigmask(signal.SIG_BLOCK, set())))
+        self.assertEqual(seen, [True])
+        self.assertNotIn(signal.SIGTERM, signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+
+    def test_cancel_cleans_up_even_when_the_status_cannot_be_written(self):
+        with patch.object(setup, 'report', side_effect=OSError('disk full')), \
+             patch.object(setup, 'stop_descendants') as stop, patch('setup_backend.os._exit', side_effect=SystemExit(130)), \
+             patch('setup_backend.signal.signal'):
+            with self.assertRaises(SystemExit):
+                setup.interrupted()
+        stop.assert_called_once()
+
+    def test_tree_wrapper_reaps_leftovers_and_relays_the_exit_code(self):
+        # The wrapped helper exits at once but leaves a grandchild that left its group
+        # (setsid) and ignores TERM: the wrapper must not return before it is gone.
+        import subprocess, sys, textwrap
+        tree = Path(setup.__file__).resolve().parent / 'reader/proc_tree.py'
+        with tempfile.TemporaryDirectory() as folder:
+            pid_file = Path(folder) / 'pid'
+            helper = textwrap.dedent(f"""
+                import subprocess, sys
+                g = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
+                                     start_new_session=True)
+                open({str(pid_file)!r}, 'w').write(str(g.pid))
+                sys.exit(3)
+            """)
+            code = subprocess.run([sys.executable, str(tree), sys.executable, '-c', helper], timeout=20).returncode
+            self.assertEqual(code, 3)
+            self.assertFalse(Path('/proc/' + pid_file.read_text()).exists())
+
+    def test_tree_wrapper_cancel_reaps_everything(self):
+        import signal, subprocess, sys, textwrap, time
+        tree = Path(setup.__file__).resolve().parent / 'reader/proc_tree.py'
+        with tempfile.TemporaryDirectory() as folder:
+            pid_file = Path(folder) / 'pids'
+            helper = textwrap.dedent(f"""
+                import os, signal, subprocess, sys, time
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                g = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
+                                     start_new_session=True)
+                open({str(pid_file)!r}, 'w').write(f'{{os.getpid()}} {{g.pid}}')
+                time.sleep(60)
+            """)
+            proc = subprocess.Popen([sys.executable, str(tree), sys.executable, '-c', helper])
+            deadline = time.monotonic() + 10
+            while not (pid_file.exists() and len(pid_file.read_text().split()) == 2) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            proc.send_signal(signal.SIGTERM)
+            self.assertEqual(proc.wait(timeout=20), 130)
+            for pid in pid_file.read_text().split():
+                self.assertFalse(Path('/proc/' + pid).exists(), pid)
 
     def test_lock_files_pin_every_package_with_hashes(self):
         import re

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from languages import NLLB, name
+import lock_install
 from online_provider import api_request
 
 MODEL_DIR = Path.home() / '.local/share/kindle-reader/translation/nllb-200-distilled-1.3B'
@@ -44,7 +45,8 @@ def translate_llm(endpoint, model, token, source, target, text):
 
 
 def nllb_ready(folder=MODEL_DIR):
-    return all((folder / item).is_file() for item in ('model.bin', 'config.json', 'shared_vocabulary.json', 'tokenizer.json'))
+    return (lock_install.verified(sys.prefix, 'nllb') and
+            all((folder / item).is_file() for item in ('model.bin', 'config.json', 'shared_vocabulary.json', 'tokenizer.json')))
 
 
 def translate_nllb(source, target, text, folder=MODEL_DIR):

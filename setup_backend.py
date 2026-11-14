@@ -1,6 +1,5 @@
 """First-use setup, runnable with system Python before the reader exists."""
 import argparse
-import ctypes
 import datetime
 import fcntl
 import json
@@ -17,6 +16,8 @@ import time
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'reader'))
 import languages  # noqa: E402  (stdlib only, shared with the reader runtime)
+import lock_install  # noqa: E402
+from proc_tree import become_subreaper, stop_descendants, wait_reaped  # noqa: E402
 DATA = Path.home() / '.local/share/kindle-reader'
 UNIT = Path.home() / '.config/systemd/user/ocrvox.service'
 PROGRESS = DATA / 'setup-progress.json'
@@ -24,9 +25,9 @@ PACKAGES = {'grim': 'grim', 'slurp': 'slurp', 'magick': 'imagemagick',
             'tesseract': 'tesseract', 'mpv': 'mpv', 'wtype': 'wtype',
             'quickshell': 'quickshell', 'hyprctl': 'hyprland', 'pactl': 'libpulse'}
 MODULES = ('PySide6', 'kokoro_onnx', 'numpy', 'soundfile', 'onnxruntime')
-# Every pip install takes exact files from a lock with sha256 hashes (reader/lock-*.txt),
-# wheels only, and nothing the lock does not list.
-LOCKED = ('--require-hashes', '--only-binary=:all:', '--no-deps')
+# Every pip install takes exact files from a lock with sha256 hashes (reader/lock-*.txt,
+# installed by reader/lock_install.py), and the runtime keeps nothing those locks do not list.
+RUNTIME_LOCKS = ('base', 'build', 'japanese', 'nllb')
 child = None
 phase = ''
 
@@ -45,7 +46,7 @@ def missing_packages(language):
 
 def runtime_ready():
     python = DATA / 'venv/bin/python'
-    if not python.is_file():
+    if not python.is_file() or not lock_install.verified(DATA / 'venv', 'base'):
         return False
     code = 'import importlib.util; import sys; sys.exit(not all(importlib.util.find_spec(m) for m in ' + repr(MODULES) + '))'
     try:
@@ -99,86 +100,30 @@ def run(args, stream=False):
             tail = tail[-8:]
             if stream:
                 report(line.strip())
-        if child.wait():
+        def forget():
+            global child
+            child = None
+        if wait_reaped(child, forget):
             raise RuntimeError('\n'.join(tail)[-1200:] or 'Command failed: ' + str(args[0]))
     finally:
         child = None
 
 
-def become_subreaper():
-    """Orphaned descendants (also ones that left the process group with setsid) are
-    re-parented to this process, so stop_descendants() can find and reap all of them."""
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        return libc.prctl(36, 1, 0, 0, 0) == 0  # PR_SET_CHILD_SUBREAPER
-    except (OSError, AttributeError):
-        return False
-
-
-def direct_children():
-    """PIDs whose parent is this process. Not yet reaped, so none of them can be reused."""
-    me, result = os.getpid(), []
-    for entry in os.listdir('/proc'):
-        if not entry.isdigit():
-            continue
-        try:
-            stat = (Path('/proc') / entry / 'stat').read_bytes()
-            if int(stat[stat.rindex(b')') + 2:].split()[1]) == me:
-                result.append(int(entry))
-        except (OSError, ValueError, IndexError):
-            continue
-    return result
-
-
-def stop_descendants(leader=None, grace=5.0):
-    """Ends every descendant and returns once all of them are reaped: TERM to the
-    helper's group, `grace` seconds to exit, then SIGKILL generation by generation
-    (descendants of a killed child are re-parented here). A process this user may not
-    signal (a root package transaction) is waited for, not abandoned."""
-    leader_alive = leader is not None
-    if leader_alive:
-        try:
-            os.killpg(leader, signal.SIGTERM)  # leader not reaped yet: the group id is ours
-        except OSError:
-            pass
-    deadline = time.monotonic() + grace
-    while True:
-        try:
-            pid, _ = os.waitpid(-1, os.WNOHANG)
-        except ChildProcessError:
-            return
-        if pid == leader:
-            leader_alive = False
-        if pid == 0:
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.05)
-    while True:
-        if leader_alive:
-            try:
-                os.killpg(leader, signal.SIGKILL)
-            except OSError:
-                pass
-        for pid in direct_children():
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-        try:
-            pid, _ = os.waitpid(-1, 0)
-        except ChildProcessError:
-            return
-        if pid == leader:
-            leader_alive = False
-
-
 def interrupted(*_):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    report('Cancelling setup…', 'cancelling')
-    stop_descendants(child.pid if child is not None else None)
-    # Setup ownership (busy state, lock) ends only now that no helper is left.
-    report('Setup cancelled. Installed files are kept; you can retry.', 'cancelled', False)
-    raise SystemExit(130)
+    try:
+        report('Cancelling setup…', 'cancelling')
+    except Exception:
+        pass  # a failed status write (full disk) must not skip the cleanup
+    try:
+        stop_descendants(child.pid if child is not None else None)
+    finally:
+        # Setup ownership (busy state, lock) ends only now that no helper is left.
+        try:
+            report('Setup cancelled. Installed files are kept; you can retry.', 'cancelled', False)
+        except Exception:
+            pass
+        os._exit(130)
 
 
 def managed_service(text):
@@ -233,7 +178,10 @@ def install(language, backend_only=False, engine=None, ocr_language=None, transl
         if not python.exists():
             run([sys.executable, '-m', 'venv', DATA / 'venv'])
         if not runtime_ready():
-            run([python, '-m', 'pip', 'install', *LOCKED, '-r', ROOT / 'reader/lock-base.txt'], stream=True)
+            # The reader runs from this runtime: stop it before files are replaced.
+            run(['systemctl', '--user', 'stop', 'ocrvox.service']) if existing else None
+            lock_install.install(python, DATA / 'venv', 'base', lambda argv: run(argv, stream=True))
+            lock_install.prune(python, DATA / 'venv', run, RUNTIME_LOCKS)
         backup = DATA / 'backups' / datetime.datetime.now().strftime('%Y%m%d-%H%M%S-%f')
         backup.mkdir(parents=True)
         report('Updating reader runtime (existing files backed up)…', 'runtime')

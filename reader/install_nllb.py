@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from install_kokoro import download_asset
+import lock_install
 from translator import MODEL_DIR, nllb_ready
 
 # OpenNMT's own CTranslate2 conversion of facebook/nllb-200-distilled-1.3B.
@@ -29,11 +30,10 @@ def install(progress=None):
             temp = path.with_suffix('.tmp')
             temp.write_text(json.dumps({'message': message}))
             temp.replace(path)
-    if not all(importlib.util.find_spec(name) for name in ('ctranslate2', 'tokenizers')):
+    if not lock_install.verified(sys.prefix, 'nllb'):
         report('Installing offline translation runtime…')
-        subprocess.run([sys.executable, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
-                        '-r', str(Path(__file__).resolve().with_name('lock-nllb.txt'))],
-                       check=True, timeout=900, stdout=sys.stderr)
+        lock_install.install(sys.executable, sys.prefix, 'nllb',
+                             lambda argv: subprocess.run(argv, check=True, timeout=900, stdout=sys.stderr))
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     for name, digest in ASSETS:
         download_asset(name, BASE, digest, MODEL_DIR, report)

@@ -6,6 +6,7 @@ import tempfile
 import wave
 from pathlib import Path
 from install_kokoro import download_asset
+import lock_install
 from languages import PIPER, PIPER_REVISION, sample
 
 BASE = 'https://huggingface.co/rhasspy/piper-voices/resolve/' + PIPER_REVISION + '/'
@@ -26,8 +27,9 @@ def install(data, language, run, report):
     report('Preparing separate Piper runtime…', 'runtime')
     if not python.exists():
         run([sys.executable, '-m', 'venv', runtime])
-    run([python, '-m', 'pip', 'install', '--require-hashes', '--only-binary=:all:', '--no-deps',
-         '-r', Path(__file__).resolve().with_name('lock-piper.txt')], stream=True)
+    if not lock_install.verified(runtime, 'piper'):
+        lock_install.install(python, runtime, 'piper', lambda argv: run(argv, stream=True))
+        lock_install.prune(python, runtime, run, ('piper',))
     prefix, name, model_digest, config_digest, size = PIPER[language]
     report(f'Downloading Piper voice (about {size} MB)…', 'voice')
     download_asset(name, BASE + prefix, model_digest, folder, report)

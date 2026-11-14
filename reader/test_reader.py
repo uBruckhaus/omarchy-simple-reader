@@ -520,3 +520,25 @@ class PageLatencyTests(unittest.TestCase):
         timer.assert_not_called()
         subject.pump_pipeline.assert_called_once()
         self.assertEqual(subject.last_text,text)
+
+
+class InstallCancelTests(unittest.TestCase):
+    def test_cancel_waits_for_the_installer_tree_before_clearing_state(self):
+        from reader import Reader
+        task = Mock(stopping=False)
+        task.stop.side_effect = lambda: setattr(task, 'stopping', True)
+        subject = SimpleNamespace(install_task=task, installing_kokoro=True, provider_status='')
+        Reader.cancel_kokoro_install(subject)
+        task.stop.assert_called_once()
+        self.assertTrue(subject.installing_kokoro)          # still busy until the wrapper exits
+        translator = Mock(stopping=False)
+        subject = SimpleNamespace(translator_install_task=translator, installing_translator=True, translation_status='')
+        Reader.cancel_translator_install(subject)
+        translator.stop.assert_called_once()
+        self.assertTrue(subject.installing_translator)
+
+    def test_installers_run_under_the_tree_wrapper(self):
+        import inspect
+        from reader import Reader
+        for method in (Reader.install_kokoro, Reader.install_translator, Reader.check_kokoro_updates):
+            self.assertIn('tree=True', inspect.getsource(method))
