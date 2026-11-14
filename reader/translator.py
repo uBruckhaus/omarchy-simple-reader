@@ -45,7 +45,7 @@ def translate_llm(endpoint, model, token, source, target, text):
 
 
 def nllb_ready(folder=MODEL_DIR):
-    return (lock_install.verified(sys.prefix, 'nllb') and
+    return (lock_install.verified(sys.prefix, 'base') and lock_install.verified(sys.prefix, 'nllb') and
             all((folder / item).is_file() for item in ('model.bin', 'config.json', 'shared_vocabulary.json', 'tokenizer.json')))
 
 

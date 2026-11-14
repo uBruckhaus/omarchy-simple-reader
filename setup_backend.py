@@ -102,7 +102,11 @@ def run(args, stream=False):
         def forget():
             global child
             child = None
-        if wait_reaped(child, forget):
+        code = wait_reaped(child, forget)
+        # Anything the helper left behind (re-parented here, also after setsid) ends now,
+        # before setup can go on or release its lock.
+        stop_descendants(grace=1.0)
+        if code:
             raise RuntimeError('\n'.join(tail)[-1200:] or 'Command failed: ' + str(args[0]))
     finally:
         if child is not None:

@@ -307,10 +307,18 @@ class ClipboardTests(unittest.TestCase):
         import importlib, sys
         sys.path.insert(0, str(Path(setup.__file__).resolve().parent / 'reader'))
         install_nllb = importlib.import_module('install_nllb')
+        import lock_install
         with tempfile.TemporaryDirectory() as folder, patch.object(install_nllb.sys, 'prefix', folder), \
              patch.object(install_nllb.subprocess, 'run') as run:
             with self.assertRaises(RuntimeError):
                 install_nllb.install()
+            # Also when its own marker is current but the base runtime is not.
+            lock_install.complete(folder, 'nllb')
+            with self.assertRaises(RuntimeError):
+                install_nllb.install()
+            import translator
+            with patch.object(translator.sys, 'prefix', folder):
+                self.assertFalse(translator.nllb_ready())
         run.assert_not_called()
 
     def test_existing_runtime_without_marker_is_not_ready(self):
@@ -354,6 +362,28 @@ class ClipboardTests(unittest.TestCase):
             code = subprocess.run([sys.executable, str(tree), sys.executable, '-c', helper], timeout=20).returncode
             self.assertEqual(code, 3)
             self.assertFalse(Path('/proc/' + pid_file.read_text()).exists())
+
+    def test_setup_reaps_what_a_finished_helper_left_behind(self):
+        import subprocess, sys, textwrap, time
+        with tempfile.TemporaryDirectory() as folder:
+            pid_file = Path(folder) / 'pid'
+            helper = textwrap.dedent(f"""
+                import subprocess, sys
+                g = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
+                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                open({str(pid_file)!r}, 'w').write(str(g.pid))
+            """)
+            harness = textwrap.dedent(f"""
+                import sys
+                sys.path.insert(0, {str(Path(setup.__file__).resolve().parent)!r})
+                import setup_backend as s
+                assert s.become_subreaper()
+                s.run([sys.executable, '-c', {helper!r}])
+                import os
+                print('alive' if os.path.exists('/proc/' + open({str(pid_file)!r}).read()) else 'gone')
+            """)
+            out = subprocess.run([sys.executable, '-c', harness], capture_output=True, text=True, timeout=30).stdout.strip()
+            self.assertEqual(out, 'gone')
 
     def test_tree_wrapper_refuses_to_run_without_subreaper(self):
         import proc_tree

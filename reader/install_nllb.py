@@ -30,10 +30,10 @@ def install(progress=None):
             temp = path.with_suffix('.tmp')
             temp.write_text(json.dumps({'message': message}))
             temp.replace(path)
+    if not lock_install.verified(sys.prefix, 'base'):
+        # Only a runtime setup built from the current lock may run pip or the translator.
+        raise RuntimeError('The reader runtime needs repair: choose Set up reader runtime first.')
     if not lock_install.verified(sys.prefix, 'nllb'):
-        if not lock_install.verified(sys.prefix, 'base'):
-            # Only a runtime setup built from the lock may run pip; never an older one.
-            raise RuntimeError('The reader runtime needs repair: choose Set up reader runtime first.')
         report('Installing offline translation runtime…')
         lock_install.install(sys.executable, sys.prefix, 'nllb',
                              lambda argv: subprocess.run(argv, check=True, timeout=900, stdout=sys.stderr))
