@@ -265,7 +265,10 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 
 if __name__ == '__main__':
     os.umask(0o077)
-    become_subreaper()
+    if not become_subreaper():
+        # Without it, a helper's descendant that called setsid could outlive Cancel unseen.
+        report('Setup failed: this system does not allow supervising the setup helpers.', 'error', False)
+        sys.exit(1)
     signal.signal(signal.SIGTERM, interrupted)
     parser = argparse.ArgumentParser()
     parser.add_argument('--language', choices=sorted(languages.LANGUAGES), default='de')

@@ -103,7 +103,10 @@ def stop_descendants(leader=None, grace=5.0):
 
 
 def main(argv):
-    become_subreaper()
+    if not become_subreaper():
+        # Without it, a descendant that called setsid could outlive Cancel unseen.
+        print('Cannot supervise the installer on this system (PR_SET_CHILD_SUBREAPER).', file=sys.stderr, flush=True)
+        return 1
     state = {'child': None}
 
     def cancelled(*_):

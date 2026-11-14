@@ -355,6 +355,13 @@ class ClipboardTests(unittest.TestCase):
             self.assertEqual(code, 3)
             self.assertFalse(Path('/proc/' + pid_file.read_text()).exists())
 
+    def test_tree_wrapper_refuses_to_run_without_subreaper(self):
+        import proc_tree
+        with patch.object(proc_tree, 'become_subreaper', return_value=False), \
+             patch.object(proc_tree.subprocess, 'Popen') as popen:
+            self.assertEqual(proc_tree.main(['true']), 1)
+        popen.assert_not_called()
+
     def test_tree_wrapper_cancel_reaps_everything(self):
         import signal, subprocess, sys, textwrap, time
         tree = Path(setup.__file__).resolve().parent / 'reader/proc_tree.py'
