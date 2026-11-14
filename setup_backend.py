@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import selectors
 import shlex
 import signal
 import subprocess
@@ -17,7 +18,6 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'reader'))
 import languages  # noqa: E402  (stdlib only, shared with the reader runtime)
 import lock_install  # noqa: E402
-from proc_tree import become_subreaper, stop_descendants, wait_reaped  # noqa: E402
 DATA = Path.home() / '.local/share/kindle-reader'
 UNIT = Path.home() / '.config/systemd/user/ocrvox.service'
 PROGRESS = DATA / 'setup-progress.json'
@@ -27,7 +27,7 @@ PACKAGES = {'grim': 'grim', 'slurp': 'slurp', 'magick': 'imagemagick',
 MODULES = ('PySide6', 'kokoro_onnx', 'numpy', 'soundfile', 'onnxruntime')
 # Every pip install takes exact files from a lock with sha256 hashes (reader/lock-*.txt,
 # installed by reader/lock_install.py into a runtime made fresh from the system Python).
-child = None
+current = None  # (helper process, its scope or None)
 phase = ''
 
 
@@ -88,49 +88,96 @@ def report(message, stage=None, busy=True):
     print(message, flush=True)
 
 
-def run(args, stream=False):
-    global child
-    child = subprocess.Popen([str(a) for a in args], start_new_session=True,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    tail = []
+def scope_gone(scope):
+    """Stops a helper's scope (TERM to every process in it, KILL after 10 s) and returns
+    True only once systemd reports it inactive. A cgroup cannot be left with setsid or a
+    double fork, so nothing the helper started survives a confirmed stop."""
+    for _ in range(3):
+        try:
+            subprocess.run(['systemctl', '--user', 'stop', '--', scope], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            state = subprocess.run(['systemctl', '--user', 'is-active', '--', scope], stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=10).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            state = ''
+        if state in ('inactive', 'failed'):
+            return True
+        time.sleep(1)
+    return False
+
+
+def run(args, stream=False, contained=True):
+    """Runs one helper. contained: in its own transient systemd scope, stopped (and
+    confirmed stopped) when the helper exits, fails or setup is cancelled. Only the
+    root package transaction runs uncontained: this user cannot stop it anyway."""
+    global current
+    scope = 'screen-narrator-setup-' + os.urandom(8).hex() + '.scope' if contained else None
+    argv = (['systemd-run', '--user', '--scope', '--quiet', '--collect', '--unit=' + scope,
+             '-p', 'TimeoutStopSec=10s', '--'] if scope else []) + [str(a) for a in args]
+    # A Cancel arriving now must find the helper it has to stop.
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGTERM, signal.SIGINT})
     try:
-        for line in child.stdout:
-            tail.append(line.strip())
-            tail = tail[-8:]
-            if stream:
-                report(line.strip())
-        def forget():
-            global child
-            child = None
-        code = wait_reaped(child, forget)
-        # Anything the helper left behind (re-parented here, also after setsid) ends now,
-        # before setup can go on or release its lock.
-        stop_descendants(grace=1.0)
-        if code:
-            raise RuntimeError('\n'.join(tail)[-1200:] or 'Command failed: ' + str(args[0]))
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        current = (proc, scope)
     finally:
-        if child is not None:
-            # Left early (an exception while streaming): end and reap the helper's tree
-            # before setup can release its lock. The leader is still unreaped here.
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            try:
-                stop_descendants(child.pid)
-            finally:
-                child = None
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
+    tail, pending, code, stopped = [], b'', None, scope is None
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                if not selector.select(1.0):
+                    if proc.poll() is not None:
+                        break  # exited; whatever still holds the pipe is ended with the scope
+                    continue
+                chunk = os.read(proc.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending += chunk
+                *lines, pending = pending.split(b'\n')
+                if len(pending) > 65536:
+                    lines, pending = lines + [pending], b''
+                for raw in lines:
+                    line = raw.decode('utf-8', 'replace').strip()
+                    tail = (tail + [line])[-8:]
+                    if stream and line:
+                        report(line)
+        code = proc.wait()
+    finally:
+        if scope is not None:
+            stopped = scope_gone(scope)
+        elif proc.poll() is None:
+            proc.wait()  # the root transaction; it cannot be stopped by this user
+        proc.stdout.close()
+        proc.wait()
+        current = None
+    if not stopped:
+        raise RuntimeError('Could not confirm that the setup helper stopped; check `systemctl --user status ' + scope + '`.')
+    if code:
+        raise RuntimeError('\n'.join(tail)[-1200:] or 'Command failed: ' + str(args[0]))
 
 
 def interrupted(*_):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     try:
         report('Cancelling setup…', 'cancelling')
     except Exception:
         pass  # a failed status write (full disk) must not skip the cleanup
+    confirmed = True
     try:
-        stop_descendants(child.pid if child is not None else None)
+        if current is not None:
+            proc, scope = current
+            if scope is not None:
+                confirmed = scope_gone(scope)
+            else:
+                proc.wait()  # a root package transaction finishes on its own
     finally:
-        # Setup ownership (busy state, lock) ends only now that no helper is left.
+        # Setup ownership (busy state, lock) ends only once no helper is left.
         try:
-            report('Setup cancelled. Installed files are kept; you can retry.', 'cancelled', False)
+            report('Setup cancelled. Installed files are kept; you can retry.' if confirmed else
+                   'Setup cancelled, but a helper could not be confirmed stopped; check systemctl --user.',
+                   'cancelled' if confirmed else 'error', False)
         except Exception:
             pass
         os._exit(130)
@@ -182,7 +229,7 @@ def install(language, backend_only=False, engine=None, ocr_language=None, transl
         packages = missing_packages(ocr_language or language)
         if packages:
             report('Authorize installation of: ' + ', '.join(packages), 'packages')
-            run(['pkexec', 'pacman', '-S', '--needed', '--noconfirm', *packages])
+            run(['pkexec', 'pacman', '-S', '--needed', '--noconfirm', *packages], contained=False)
         report('Preparing private Python runtime…', 'runtime')
         python = DATA / 'venv/bin/python'
         if not runtime_ready():
@@ -269,11 +316,8 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 
 if __name__ == '__main__':
     os.umask(0o077)
-    if not become_subreaper():
-        # Without it, a helper's descendant that called setsid could outlive Cancel unseen.
-        report('Setup failed: this system does not allow supervising the setup helpers.', 'error', False)
-        sys.exit(1)
     signal.signal(signal.SIGTERM, interrupted)
+    signal.signal(signal.SIGINT, interrupted)
     parser = argparse.ArgumentParser()
     parser.add_argument('--language', choices=sorted(languages.LANGUAGES), default='de')
     parser.add_argument('--backend-only', action='store_true')

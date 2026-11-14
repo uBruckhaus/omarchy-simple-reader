@@ -38,9 +38,10 @@ Both are stored in the widget's own entry in `~/.config/omarchy/shell.json` (`"c
 Hindi, Japanese and Chinese (about 330–354 MB plus runtime packages; Japanese adds a
 270 MB pronunciation dictionary). Piper covers the other languages with one voice each (60–122 MB plus a separate pinned runtime). Setup
 installs the matching Tesseract OCR data. The popup defaults to your desktop locale. Progress, retry and cancellation
-are built in: Cancel stops the running step's processes (including ones that left its process group),
-waits five seconds, ends what is left with SIGKILL and reaps all of them before setup reports
-**cancelled** and can be started again. The Kokoro voice, Kokoro model update and offline translator
+are built in: each setup step runs in its own transient systemd scope (`screen-narrator-setup-….scope`),
+which every process it starts belongs to, also after `setsid` or a double fork. When a step ends or fails,
+or on Cancel (and Ctrl-C in a terminal), setup stops that scope (TERM, KILL after 10 seconds) and goes
+on, reports **cancelled** or releases its lock only once systemd reports the scope inactive. The Kokoro voice, Kokoro model update and offline translator
 installers in the popup run under the same supervisor (`reader/proc_tree.py`); their Cancel shows
 **Cancelling…** until every process they started is gone. The reader service runs with
 `KillMode=control-group` and `TimeoutStopSec=30`, so stopping it ends every process it started,

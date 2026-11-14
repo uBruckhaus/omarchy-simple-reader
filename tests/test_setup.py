@@ -53,46 +53,44 @@ class SetupTests(unittest.TestCase):
                 self.assertFalse(setup.setup_state()['busy'])
                 self.assertEqual(setup.setup_state()['phase'], 'error')
 
-    def test_cancel_reaps_every_descendant_before_releasing_setup(self):
+    def test_cancel_ends_every_helper_process_before_releasing_setup(self):
         # A helper that ignores TERM starts a grandchild that leaves the process group
-        # (setsid) and ignores TERM too; cancel must end and reap both before setup exits.
+        # (setsid) and ignores TERM too; Cancel (TERM or Ctrl-C) must end both first.
         import os, signal, subprocess, sys, textwrap, time
         root = Path(setup.__file__).resolve().parent
-        with tempfile.TemporaryDirectory() as folder:
-            pids = Path(folder) / 'pids'
-            helper = textwrap.dedent(f"""
-                import os, signal, subprocess, sys, time
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                g = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
-                                     start_new_session=True)
-                open({str(pids)!r}, 'w').write(f'{{os.getpid()}} {{g.pid}}')
-                print('started', flush=True)
-                time.sleep(60)
-            """)
-            harness = textwrap.dedent(f"""
-                import signal, sys
-                from pathlib import Path
-                sys.path.insert(0, {str(root)!r})
-                import setup_backend as s
-                s.DATA = Path({folder!r}); s.PROGRESS = s.DATA / 'progress.json'
-                assert s.become_subreaper()
-                signal.signal(signal.SIGTERM, s.interrupted)
-                s.run([sys.executable, '-c', {helper!r}], stream=True)
-            """)
-            proc = subprocess.Popen([sys.executable, '-c', harness], stdout=subprocess.PIPE, text=True)
-            deadline = time.monotonic() + 10
-            while not (pids.exists() and len(pids.read_text().split()) == 2) and time.monotonic() < deadline:
-                time.sleep(0.05)
-            helper_pid, grandchild = map(int, pids.read_text().split())
-            proc.send_signal(signal.SIGTERM)
-            start = time.monotonic()
-            self.assertEqual(proc.wait(timeout=20), 130)
-            proc.stdout.close()
-            self.assertGreaterEqual(time.monotonic() - start, 4)  # TERM grace first
-            for pid in (helper_pid, grandchild):
-                self.assertFalse(Path(f'/proc/{pid}').exists(), pid)   # dead and reaped
-            state = json.loads((Path(folder) / 'progress.json').read_text())
-            self.assertEqual((state['phase'], state['busy']), ('cancelled', False))
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with tempfile.TemporaryDirectory() as folder:
+                pids = Path(folder) / 'pids'
+                helper = textwrap.dedent(f"""
+                    import os, signal, subprocess, sys, time
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    g = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
+                                         start_new_session=True)
+                    open({str(pids)!r}, 'w').write(f'{{os.getpid()}} {{g.pid}}')
+                    print('started', flush=True)
+                    time.sleep(60)
+                """)
+                harness = textwrap.dedent(f"""
+                    import signal, sys
+                    from pathlib import Path
+                    sys.path.insert(0, {str(root)!r})
+                    import setup_backend as s
+                    s.DATA = Path({folder!r}); s.PROGRESS = s.DATA / 'progress.json'
+                    signal.signal(signal.SIGTERM, s.interrupted)
+                    signal.signal(signal.SIGINT, s.interrupted)
+                    s.run([sys.executable, '-c', {helper!r}], stream=True)
+                """)
+                proc = subprocess.Popen([sys.executable, '-c', harness], stdout=subprocess.DEVNULL)
+                deadline = time.monotonic() + 15
+                while not (pids.exists() and len(pids.read_text().split()) == 2) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                helper_pid, grandchild = map(int, pids.read_text().split())
+                proc.send_signal(signum)
+                self.assertEqual(proc.wait(timeout=60), 130)
+                for pid in (helper_pid, grandchild):
+                    self.assertFalse(Path(f'/proc/{pid}').exists(), pid)
+                state = json.loads((Path(folder) / 'progress.json').read_text())
+                self.assertEqual((state['phase'], state['busy']), ('cancelled', False))
 
     def test_unknown_service_is_preserved(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -241,16 +239,15 @@ class ClipboardTests(unittest.TestCase):
             lock_install.marker(prefix, 'base').write_text('0' * 64 + '\n')
             self.assertFalse(lock_install.verified(prefix, 'base'))
 
-    def test_helper_tree_is_ended_when_streaming_fails(self):
-        import subprocess, sys
+    def test_helper_scope_is_stopped_when_streaming_fails(self):
+        import sys
         with patch.object(setup, 'report', side_effect=OSError('disk full')), \
-             patch.object(setup, 'stop_descendants') as stop, patch('setup_backend.signal.signal'):
+             patch.object(setup, 'scope_gone', wraps=setup.scope_gone) as gone:
             with self.assertRaises(OSError):
                 setup.run([sys.executable, '-c', 'print("line", flush=True); import time; time.sleep(30)'], stream=True)
-        stop.assert_called_once()
-        self.assertIsNone(setup.child)
-        import os
-        os.killpg(stop.call_args.args[0], 9); os.waitpid(stop.call_args.args[0], 0)  # the mock did not reap it
+        gone.assert_called_once()
+        self.assertIsNone(setup.current)
+        self.assertTrue(gone.call_args.args[0].startswith('screen-narrator-setup-'))
 
     def test_unverified_runtime_is_rebuilt_from_the_system_python_never_upgraded(self):
         import lock_install, sys
@@ -339,11 +336,12 @@ class ClipboardTests(unittest.TestCase):
 
     def test_cancel_cleans_up_even_when_the_status_cannot_be_written(self):
         with patch.object(setup, 'report', side_effect=OSError('disk full')), \
-             patch.object(setup, 'stop_descendants') as stop, patch('setup_backend.os._exit', side_effect=SystemExit(130)), \
-             patch('setup_backend.signal.signal'):
+             patch.object(setup, 'current', (None, 'screen-narrator-setup-0123456789abcdef.scope')), \
+             patch.object(setup, 'scope_gone', return_value=True) as gone, \
+             patch('setup_backend.os._exit', side_effect=SystemExit(130)), patch('setup_backend.signal.signal'):
             with self.assertRaises(SystemExit):
                 setup.interrupted()
-        stop.assert_called_once()
+        gone.assert_called_once_with('screen-narrator-setup-0123456789abcdef.scope')
 
     def test_tree_wrapper_reaps_leftovers_and_relays_the_exit_code(self):
         # The wrapped helper exits at once but leaves a grandchild that left its group
@@ -363,27 +361,28 @@ class ClipboardTests(unittest.TestCase):
             self.assertEqual(code, 3)
             self.assertFalse(Path('/proc/' + pid_file.read_text()).exists())
 
-    def test_setup_reaps_what_a_finished_helper_left_behind(self):
+    def test_setup_ends_what_a_finished_helper_left_behind(self):
+        # The helper exits at once; its setsid grandchild ignores TERM and keeps the
+        # output pipe open. run() must return promptly with the grandchild gone.
         import subprocess, sys, textwrap, time
         with tempfile.TemporaryDirectory() as folder:
             pid_file = Path(folder) / 'pid'
             helper = textwrap.dedent(f"""
                 import subprocess, sys
                 g = subprocess.Popen([sys.executable, '-c', 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'],
-                                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                     start_new_session=True)
                 open({str(pid_file)!r}, 'w').write(str(g.pid))
             """)
-            harness = textwrap.dedent(f"""
-                import sys
-                sys.path.insert(0, {str(Path(setup.__file__).resolve().parent)!r})
-                import setup_backend as s
-                assert s.become_subreaper()
-                s.run([sys.executable, '-c', {helper!r}])
-                import os
-                print('alive' if os.path.exists('/proc/' + open({str(pid_file)!r}).read()) else 'gone')
-            """)
-            out = subprocess.run([sys.executable, '-c', harness], capture_output=True, text=True, timeout=30).stdout.strip()
-            self.assertEqual(out, 'gone')
+            start = time.monotonic()
+            setup.run([sys.executable, '-c', helper])
+            self.assertLess(time.monotonic() - start, 30)
+            self.assertFalse(Path('/proc/' + pid_file.read_text()).exists())
+
+    def test_only_the_root_package_transaction_runs_outside_a_scope(self):
+        import re
+        source = Path(setup.__file__).read_text()
+        self.assertEqual(re.findall(r"run\(\[[^\]]*\][^)]*contained=False\)", source),
+                         ["run(['pkexec', 'pacman', '-S', '--needed', '--noconfirm', *packages], contained=False)"])
 
     def test_tree_wrapper_refuses_to_run_without_subreaper(self):
         import proc_tree
