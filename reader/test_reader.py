@@ -361,7 +361,9 @@ class PinnedWindowTests(unittest.TestCase):
         self.assertIn('send_shortcut({ mods = "", key = "Right" })', lua)
         # No window is named, so Hyprland never moves the keyboard focus for the key.
         self.assertNotIn('window =', lua)
-        self.assertIn('l.interactivity ~= 0', lua)
+        # Hyprland 0.57 names the field keyboard_interactivity; older ones interactivity.
+        self.assertIn('ki = l.keyboard_interactivity if ki == nil then ki = l.interactivity end', lua)
+        self.assertIn('ki ~= 0', lua)
 
     def test_page_turn_waits_while_another_window_has_the_focus(self):
         # send_shortcut would focus the book and tell it which keys are held elsewhere.
@@ -413,6 +415,7 @@ class PinnedWindowTests(unittest.TestCase):
             status='Turning to next page…', page_turned_at=time.monotonic() - 1.5,
             turn_retries=0, is_speaking=lambda: False, do_page_turn=Mock(),
             set_enabled=Mock(), update=Mock())
+        subject.page_turn_missed = lambda: Reader.page_turn_missed(subject)
         with patch('reader.Path.read_bytes', return_value=b'same page'):
             Reader.prepared(subject, 0, '', '')
             self.assertEqual(subject.turn_retries, 1)
@@ -428,6 +431,100 @@ class PinnedWindowTests(unittest.TestCase):
             subject.set_enabled.assert_not_called()
             subject.update.assert_called_once_with('Waiting for you to turn the page')
             self.assertIsNone(subject.page_turned_at)
+
+    def test_unchanged_text_after_retries_waits_for_manual_turn(self):
+        import time
+        from reader import Reader
+        subject = SimpleNamespace(status='Turning to next page…', page_turned_at=time.monotonic() - 3.5,
+            turn_retries=2, is_speaking=lambda: False, do_page_turn=Mock(), update=Mock(),
+            pdf_turned_at=None, last_text='Same words on this page', candidate='', scanning=True,
+            image_candidate=b'b', ocr_image=b'a')
+        subject.page_turn_missed = lambda: Reader.page_turn_missed(subject)
+        with patch('reader.visible_ocr', return_value=('Same words on this page', [])), \
+                patch('reader.Path.read_text', return_value=''), patch('reader.desktop_notify') as notify:
+            Reader.recognized(subject, 0, '', '')
+        subject.do_page_turn.assert_not_called()
+        subject.update.assert_called_once_with('Waiting for you to turn the page')
+        notify.assert_called_once()
+        self.assertEqual(subject.turn_retries, 0)
+        self.assertIsNone(subject.page_turned_at)
+
+    def kindle_hyprctl(self, others=()):
+        import json
+        clients = [dict(address='0x123', workspace=dict(id=2), at=[20, 50], size=[1000, 800]), *others]
+        monitors = [dict(activeWorkspace=dict(id=2), specialWorkspace=dict(id=0))]
+        return (json.dumps(clients) + '\n\n\n' + json.dumps(monitors) + '\n\n\n'
+                + json.dumps(dict(address='0x123')) + '\n\n\n' + json.dumps(dict(locked=False)))
+
+    def test_margin_click_point_avoids_covered_spots(self):
+        from reader import margin_click_point
+        # Right margin, lower point first (notifications stack from the top right).
+        self.assertEqual(margin_click_point(self.kindle_hyprctl(), '0x123'), (996, 650))
+        lower = dict(address='0xb', workspace=dict(id=2), at=[900, 600], size=[300, 100])
+        self.assertEqual(margin_click_point(self.kindle_hyprctl([lower]), '0x123'), (996, 250))
+        upper = dict(address='0xc', workspace=dict(id=2), at=[900, 200], size=[300, 100])
+        self.assertIsNone(margin_click_point(self.kindle_hyprctl([lower, upper]), '0x123'))
+        # A window on another workspace or a hidden group tab covers nothing.
+        away = dict(lower, workspace=dict(id=5))
+        hidden = dict(lower, hidden=True)
+        self.assertEqual(margin_click_point(self.kindle_hyprctl([away, hidden]), '0x123'), (996, 650))
+        self.assertIsNone(margin_click_point(self.kindle_hyprctl(), '0x999'))
+        self.assertIsNone(margin_click_point('garbage', '0x123'))
+        odd = self.kindle_hyprctl().replace('[1000, 800]', '["1000", 800]')
+        self.assertIsNone(margin_click_point(odd, '0x123'))
+
+    def test_page_click_command_keeps_focus_and_pointer(self):
+        from reader import page_click_command, CLICK_SKIPPED
+        lua = page_click_command('0x123', 996, 650)[2]
+        # Same checks as the key, before anything moves.
+        self.assertLess(lua.index('w.address ~= "0x123"'), lua.index('hl.dsp.cursor.move'))
+        self.assertLess(lua.index('hl.get_layers()'), lua.index('hl.dsp.cursor.move'))
+        # Only while the pointer is over the book, and no window named (no focus moves).
+        self.assertLess(lua.index('inside(p.x, p.y)'), lua.index('hl.dsp.cursor.move'))
+        self.assertIn(CLICK_SKIPPED, lua)
+        self.assertNotIn('window =', lua)
+        self.assertIn('key = "mouse:272", state = "down"', lua)
+        self.assertIn('key = "mouse:272", state = "up"', lua)
+        # The pointer goes back after the click.
+        self.assertGreater(lua.rindex('cursor.move({ x = p.x, y = p.y })'), lua.index('state = "up"'))
+        self.assertIsNone(page_click_command('0x1" }) os.execute("x', 1, 2))
+        self.assertIsNone(page_click_command('0x123', '1); os.execute("x")', 2))
+        self.assertIsNone(page_click_command('0x123', True, 2))
+
+    def kindle_turn(self, retries, keys=None):
+        from reader import Reader
+        subject = SimpleNamespace(enabled=True, paused=False, epoch=7, target='0x123',
+            pdf_keys=lambda: keys, is_kindle_target=lambda: True, turn_retries=retries,
+            update=Mock(), page_turn_sent=Mock())
+        with patch('reader.Task') as task:
+            Reader.do_page_turn(subject)
+            task.call_args.args[2](0, self.kindle_hyprctl(), '')
+        return subject, task
+
+    def test_kindle_retry_clicks_the_right_margin_then_falls_back_to_the_key(self):
+        from reader import CLICK_SKIPPED, TURN_DEFERRED
+        subject, task = self.kindle_turn(1)
+        self.assertIn('cursor.move({ x = 996, y = 650 })', task.call_args.args[1][2])
+        clicked = task.call_args.args[2]
+        clicked(0, 'ok', '')
+        subject.page_turn_sent.assert_called_once_with(0, 'ok', '')
+        # Pointer elsewhere: the key goes instead.
+        with patch('reader.Task') as again:
+            clicked(7, f'error: {CLICK_SKIPPED}: pointer', '')
+            self.assertIn('send_shortcut({ mods = "", key = "Right" })', again.call_args.args[1][2])
+        # Focus lost meanwhile: wait for it, as with the key.
+        subject.page_turn_sent.reset_mock()
+        with patch('reader.Task') as again:
+            clicked(7, f'error: {TURN_DEFERRED}: focus', '')
+            again.assert_not_called()
+        subject.page_turn_sent.assert_called_once()
+
+    def test_first_turn_retry_two_and_pdfs_send_the_key(self):
+        for retries, keys in ((0, None), (2, None), (1, ['Next', 'Down'])):
+            subject, task = self.kindle_turn(retries, keys)
+            lua = task.call_args.args[1][2]
+            self.assertIn('send_shortcut', lua)
+            self.assertNotIn('mouse:272', lua)
 
     def test_waiting_for_manual_turn_keeps_scanning_with_follow_off(self):
         from reader import Reader

@@ -74,6 +74,9 @@ Whisper is speech recognition, so it is not offered as a reading voice.
 4. With **Turn Kindle and PDF pages after reading** on, the next page follows automatically.
    The page turns only while the book window has the focus: a key sent to an unfocused window
    would tell it which keys are held in the app you are using. Click the book to continue.
+   Kindle ignores keys while one of its buttons has the focus; then the second try clicks the
+   book's right page margin (only while the pointer is over the book; the pointer moves back at
+   once). If the page still does not turn, turn it yourself and reading goes on.
    A page taller than the window is scrolled down first. After the last page the reader turns
    off and shows **End of document**.
 
