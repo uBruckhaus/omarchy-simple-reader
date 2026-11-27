@@ -210,65 +210,22 @@ PINNED_QUERY = ['hyprctl', '--batch', 'j/clients;j/monitors']
 TURN_QUERY = ['hyprctl', '--batch', 'j/clients;j/monitors;j/activewindow;j/locked']
 
 
-def shown_clients(out):
-    """All clients from PINNED_QUERY/TURN_QUERY output, each with `shown` (on a workspace
-    that is on screen, not a hidden group tab)."""
+def pinned_window(out, address):
+    """The book's entry from PINNED_QUERY output, plus `shown` (on a workspace that is on
+    screen, not a hidden group tab); {} once the window is closed."""
     decoder = json.JSONDecoder()
     clients, end = decoder.raw_decode(out.lstrip())
     monitors, _ = decoder.raw_decode(out.lstrip()[end:].lstrip())
+    window = next((c for c in clients if c.get('address') == address), None)
+    if not window:
+        return {}
     on_screen = set()
     for monitor in monitors:
         on_screen.add(monitor.get('activeWorkspace', {}).get('id'))
         if monitor.get('specialWorkspace', {}).get('id'):
             on_screen.add(monitor['specialWorkspace']['id'])
-    for client in clients:
-        client['shown'] = client.get('workspace', {}).get('id') in on_screen and not client.get('hidden')
-    return clients
-
-
-def pinned_window(out, address):
-    """The book's entry from PINNED_QUERY output, plus `shown` (on a workspace that is on
-    screen, not a hidden group tab); {} once the window is closed."""
-    return next((c for c in shown_clients(out) if c.get('address') == address), {})
-
-
-def _pair(value):
-    if (isinstance(value, list) and len(value) == 2
-            and all(isinstance(v, int) and not isinstance(v, bool) and abs(v) < 1 << 20 for v in value)):
-        return value
-    return None
-
-
-def margin_click_point(out, address):
-    """Screen point in Kindle Cloud Reader's right page-turn margin (the non-focusable
-    div.kr-chevron-container-right) of the book, clear of the top toolbar, the centred '>'
-    button and the bottom scrubber, that no other shown window covers. The lower point
-    comes first: notifications stack from the top right. None when there is none."""
-    try:
-        clients = shown_clients(out)
-    except (ValueError, TypeError, AttributeError):
-        return None
-    book = next((c for c in clients if isinstance(c, dict) and c.get('address') == address), None)
-    if not book or not book.get('shown'):
-        return None
-    at, size = _pair(book.get('at')), _pair(book.get('size'))
-    if not at or not size or size[0] < 80 or size[1] < 120:
-        return None
-    width, height = size
-    rx = width - min(24, max(8, width // 40))
-    for rel_y in (min(height - 60, round(height * 0.75)), max(60, round(height * 0.25))):
-        x, y = at[0] + rx, at[1] + rel_y
-        covered = False
-        for other in clients:
-            if not isinstance(other, dict) or other is book or not other.get('shown'):
-                continue
-            o_at, o_size = _pair(other.get('at')), _pair(other.get('size'))
-            if not o_at or not o_size or (o_at[0] <= x < o_at[0] + o_size[0] and o_at[1] <= y < o_at[1] + o_size[1]):
-                covered = True
-                break
-        if not covered:
-            return x, y
-    return None
+    window['shown'] = window.get('workspace', {}).get('id') in on_screen and not window.get('hidden')
+    return window
 
 
 def book_has_focus(out, address):
@@ -288,9 +245,6 @@ def book_has_focus(out, address):
 
 
 TURN_DEFERRED = 'narrator-turn-deferred'
-# The margin click was not made (pointer not over the book): the key is sent instead.
-CLICK_SKIPPED = 'narrator-click-skipped'
-
 # Lua that errors with TURN_DEFERRED unless the book is the focused window and no layer
 # surface (a launcher, a shell panel) accepts keyboard input. Hyprland 0.57 names the
 # layer field keyboard_interactivity (interactivity before); with neither, it defers.
@@ -299,31 +253,6 @@ FOCUS_CHECK = ('local w = hl.get_active_window() '
                'for _, l in ipairs(hl.get_layers()) do '
                'local ki = l.keyboard_interactivity if ki == nil then ki = l.interactivity end '
                'if l.mapped ~= false and ki ~= 0 then error("' + TURN_DEFERRED + ': layer") end end ')
-
-
-def page_click_command(address, x, y):
-    """hyprctl argv that clicks the book at screen point (x, y) and puts the pointer back.
-
-    Same focus check as page_turn_command, so the keyboard focus never moves (a mouse
-    button changes only the pointer focus). The click is made only while the pointer is
-    already over the book and the point lies inside it: warping there and back then never
-    leaves the book, so focus-follows-mouse cannot hand the focus to another window. Else
-    the error carries CLICK_SKIPPED. None for bad input."""
-    if (not re.fullmatch(r'0x[0-9a-fA-F]{1,16}', str(address))
-            or not all(isinstance(v, int) and not isinstance(v, bool) and abs(v) < 1 << 20 for v in (x, y))):
-        return None
-    lua = (FOCUS_CHECK.format(address=address) +
-           'local p = hl.get_cursor_pos() '
-           'local function inside(px, py) return px >= w.at.x and py >= w.at.y '
-           'and px < w.at.x + w.size.x and py < w.at.y + w.size.y end '
-           f'if not p or not inside(p.x, p.y) or not inside({x}, {y}) then error("{CLICK_SKIPPED}: pointer") end '
-           f'hl.dispatch(hl.dsp.cursor.move({{ x = {x}, y = {y} }})) '
-           'local down = pcall(hl.dispatch, hl.dsp.send_key_state({ mods = "", key = "mouse:272", state = "down" })) '
-           'pcall(hl.dispatch, hl.dsp.send_key_state({ mods = "", key = "mouse:272", state = "up" })) '
-           'hl.dispatch(hl.dsp.cursor.move({ x = p.x, y = p.y })) '
-           f'if not down then error("{CLICK_SKIPPED}: click") end '
-           'return true')
-    return ['hyprctl', 'eval', lua]
 
 
 def page_turn_command(address, key):
@@ -1789,27 +1718,8 @@ class Reader(QObject):
             # A page that continues below the window is scrolled first; otherwise next page.
             key = (keys[1] if getattr(self, 'pdf_cut_off', False) else keys[0]) if keys else 'Right'
             argv = page_turn_command(address, key)
-            if not argv:
-                return
-            # Kindle Cloud Reader ignores the keyboard while one of its buttons (such as the
-            # '>' chevron after a click by hand) holds the DOM focus. When the first key did
-            # not turn the page, click the non-focusable right margin instead: that turns the
-            # page and gives the focus back to the page, so the next keys work again.
-            point = (margin_click_point(out, address) if not keys and getattr(self, 'turn_retries', 0) == 1
-                     and self.is_kindle_target() else None)
-            click = page_click_command(address, *point) if point else None
-            if click:
-                def clicked(code, out, err):
-                    if not self.enabled or self.paused or self.epoch != epoch or self.target != address:
-                        return
-                    if code and TURN_DEFERRED not in (out or '') + (err or ''):
-                        # Not clicked (pointer elsewhere): the key instead.
-                        Task(self, argv, self.page_turn_sent, timeout=3)
-                        return
-                    self.page_turn_sent(code, out, err)
-                Task(self, click, clicked, timeout=3)
-                return
-            Task(self, argv, self.page_turn_sent, timeout=3)
+            if argv:
+                Task(self, argv, self.page_turn_sent, timeout=3)
         Task(self, TURN_QUERY, located, timeout=3)
 
     def page_turn_sent(self, code, out, err):
